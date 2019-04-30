@@ -1,0 +1,18 @@
+# YARA
+
+
+
+
+
+
+
+
+
+
+
+## Coding Guidlines
+
+- Any function used within only one function body should be placed in a '''where''' clause, unless its unreadable. Simply because a function is general. Cluttering up top level definitions is messy. 
+- Don't worry about eta reduction in places in a function if it assists readability.
+- Comments should be used at necessary toplevel functions, and ocasionally in large function bodies. Generally, no narration.
+- 
