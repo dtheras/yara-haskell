@@ -33,6 +33,8 @@ module Utils
   , takeWhile
   , space1
   , spaces
+  , word8
+  , anyWord8
 
   -- Specific character parsers
   , openCurl
@@ -67,15 +69,16 @@ module Utils
   ) where
 
 import Prelude hiding (map, null, drop, takeWhile, length, (++),
-                       concat)
+                       concat, reverse)
 import Control.Monad.Reader (replicateM, void, when)
 import Control.Applicative hiding (liftA2)
 import Data.Bits
-import Data.ByteString hiding (count, pack, empty, reverse, foldr, append, takeWhile)
+import Data.ByteString hiding (count, elem, empty, foldr, append, takeWhile)
 import qualified Data.ByteString as BS (takeWhile)
-import Data.ByteString.Char8 (pack)
+import qualified Data.ByteString.Char8 as C8
 import Data.ByteString.Unsafe
 import Data.Functor
+import qualified Data.List as List
 import Data.String (IsString(..))
 import GHC.Word
 
@@ -89,14 +92,14 @@ infix 0 <?>
 infixr 2 <^>
 
 instance (a ~ ByteString) => IsString (YaraParser a) where
-    fromString = string . pack
+    fromString = string . C8.pack
 
 -- | Concatenate a monoid after reversing its elements.  Used to
 -- glue together a series of textual chunks that have been accumulated
 -- \"backwards\".
 concatReverse :: Monoid m => [m] -> m
 concatReverse [x] = x
-concatReverse xs  = mconcat (reverse xs)
+concatReverse xs  = mconcat (List.reverse xs)
 {-# INLINE concatReverse #-}
 
 
@@ -172,7 +175,7 @@ sepBy1 p s = scan
 
 manyTill :: YaraParser a -> YaraParser b -> YaraParser [a]
 manyTill p end = scan
-    where scan = (end *> pure []) <|> liftA2 (:) p scan
+    where scan = (end $> []) <|> liftA2 (:) p scan
 {-# INLINE manyTill #-}
 
 -- | Skip zero or more instances of an action.
@@ -283,8 +286,6 @@ isSpace :: Word8 -> Bool
 isSpace w = w == 32 || w - 9 <= 4
 {-# INLINE isSpace #-}
 
-isntSpace :: Word8 -> Bool
-isntSpace = not . isSpace
 -- | A predicate that matches either a carriage return @\'\\r\'@ or
 -- newline @\'\\n\'@ character.
 isEndOfLine :: Word8 -> Bool
@@ -492,41 +493,70 @@ flank del par = between del del par
 -- Note: the parser must succeed atleast once (so "(p)" will pass but not "()").
 grouping :: YaraParser a -> YaraParser [a]
 grouping p = between openParen closeParen $ interleaved vertBar p
-  where interleaved s p = sepBy1 p (skipTo s <* spaces)
+  where interleaved s par = sepBy1 par (skipTo s <* spaces)
 {-# INLINE grouping #-}
 
--- | Parse a literal string, matching YARA specifications
---
---  "Text strings can also contain the following subset of the escape sequences
---   available in the C language:
---       \"    Double quote
---       \\    Backslash
---       \t    Horizontal tab
---       \n    New line
---       \xdd  Any byte in hexadecimal notation                                  "
-quotedString :: YaraParser ByteString
-quotedString = (quote *> acc) <?> "error parsing literal string"
-     where
-        esc w = w == 0x22 || w == 0x5C || w == 0x09 || w == 0x0A || w == 0x0D
-        pEsc = satisfy esc
-        acc = do
-           c <- takeTill esc
-           d <- satisfy esc
-           case d of
-             -- if backslash...
-             0x5C -> peekWord8 >>= \case
-                         -- followed by quot, keep it and resume parsing
-                         0x22 -> satisfy (==0x22) *> ((c `snoc` 0x22 ++) <$> acc)
-                         -- start of hexidemcial
-                         --0x78 -> do
-                         -- anything else just resume parsing
-                         _    -> (++ c) <$> acc
-             -- done if reached quote
-             0x22 -> return c
-             -- any other escape char resume parsing
-             _    -> (++ c) <$> acc
-           <?> "error handling escape quot in a literal string"
+-- | litString parses a literal string
+-- Strings can contain the following escape bytes: \" \\ \t \n \r
+-- Handles string breaks.
+--  > "this is a string on \
+--  >      two seperate lines"
+-- Returns the content of the string (without the quotation bytes)
+litString :: YaraParser ByteString
+litString = quote *> (go "") <* quote <?> "litString"
+  where
+    go acc = do
+      -- Take till a quote, newline, or backslash
+      bs <- takeTill $ \q -> elem q [92, 34, 10]
+      let acc_ = reverse bs ++ acc
+      peekWord8 >>= \case
+        -- If unescaped quote, we've reached the end of the string.
+        -- The accumulation is stored in reverse until returned
+        34 -> return $ reverse acc_
+        -- If new line, fault since string was not closed.
+        10 -> fault "string was not closed"
+        -- If backslash, check next byte.
+        92 -> do
+          r <- anyWord8
+          s <- anyWord8
+             -- If next is a slash of quote, then we append.
+             -- NOTE: the appending in reverse. 
+          if | s == 34 || s == 92 -> go $ pack [s, r] ++ acc_
+             -- When there is a space after a slash, may have
+             -- a string break among multiple lines, but a few empty
+             -- spaces follow
+             | isHorizontalSpace s -> do
+                 takeWhile isHorizontalSpace
+                 endOfLine
+                 takeWhile isHorizontalSpace
+                 n <- singleton <$> satisfy notSpace
+                 go $ n ++ acc_
+             -- Handles the case that there is a newline immediately after
+             -- the escape slash.
+             | 10 == s -> do
+                 takeWhile isHorizontalSpace
+                 n <- singleton <$> satisfy notSpace
+                 go $ n ++ acc_
+             -- Anyother is not supported.
+             | otherwise -> fault $ "Unrecognized escape char: " ++ singleton s
+        -- Shuts up incomplete-patterns
+        _  -> fault "How did you get here?"
+    notSpace = not . isSpace
 
+{-
+-- The following it to test the above literal string parser. In case changes are
+-- introduced, we should not the return results.
+test_litString :: IO ()
+test_litString =
+  s <- C8.readFile "Test_text.txt"
+  Prelude.putStrLn $ show s
+  Data.ByteString.putStrLn s
+  Prelude.print $ parse (do b <- litString
+                            _ <- endOfLine
+                            return b)
+                        defaultEnv
+                        s
+-}
 
 
 -- MATCH STRINGS
@@ -659,6 +689,7 @@ strings :: Foldable f => f ByteString -> YaraParser ByteString
 strings = foldMap string
 {-# INLINE strings #-}
 {-# SPECIALIZE strings :: Seq.Seq ByteString -> YaraParser ByteString #-}
+{-# SPECIALIZE strings :: [ByteString] -> YaraParser ByteString #-}
 
 -- | Satisfy a literal string, ignoring case.
 -- ASCII-specific but fast, oh yes.

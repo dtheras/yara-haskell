@@ -1,5 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE LambdaCase #-}
 -- |
 -- Module      :  Yara.Parsing.Args
 -- Copyright   :  David Heras 2018-2019
@@ -12,11 +14,11 @@
 -- Parse and handle command line arguments
 module Args (parseArgs , showHelp) where
 
-import Prelude hiding ((++), takeWhile, all, unlines, unwords, head, take, drop, concat, splitAt)
-import Data.ByteString hiding (takeWhile, length)
+import Prelude hiding ((++), takeWhile, reverse, all, unlines, unwords, head, take, drop, concat, splitAt)
+import Data.ByteString hiding (takeWhile, elem, length)
 import Data.ByteString.Char8 (unlines, unwords)
-import Control.Monad.State.Strict
 import Data.Sequence ((<|))
+import Control.Monad.State.Strict
 import GHC.Word
 
 import qualified Data.Map.Strict as Map
@@ -59,11 +61,43 @@ yaraKeywords = Set.fromDistinctAscList [
 
 
 
+
+{- This should be moved to Args.hs soon/eventually. But since quoted filepaths
+as well as unquoted can be passed into the command line, we need to handle both
+but those unquoted ones have to be parsed differently since spaces have to
+be escaped themselves
+
+-- we are not allowing newline characters. its easier. must be oneline. can allow
+-- any visible character. except space. which must be escaped
+NOTE: remember this is a parser for a filepath entered into the command line!-}
+filepath :: YaraParser ByteString
+#if defined(mingw32_HOST_OS) || defined(__MINGW32__)
+filepath = undefined
+#else
+filepath = go ""
+  where
+    go acc = do
+      bs <- takeWhile $ \w -> w - 21 <= 70 || w - 93 <= 33
+      let acc_ = reverse bs ++ acc
+      peekWord8 >>= \case
+        20 -> return acc_
+        92 -> do
+          r <- anyWord8
+          s <- anyWord8
+          if s == 20
+            then go $ singleton s ++ acc_
+            else go $ pack [s, r] ++ acc_
+        _  -> do
+          r <- singleton <$> anyWord8
+          fault $ "Unrecognized filepath character: " ++ r
+#endif
+{-# INLINE filepath #-}
+
+
+
 value :: YaraParser Value
-value = Value_B <$> bool <|> Value_I <$> decimal <|> Value_S <$> (takeWhile $ const True)
-
-
-
+value = Value_B <$> bool <|> Value_I <$> decimal <|> Value_S <$> takeWhile (const True)
+{-# INLINE value #-}
 
 -- | A version of 'when' that returns failure if predicate is False.
 when_ :: Bool
@@ -83,14 +117,14 @@ when_ b p q = if b then q else fault p
 -- !!!!!
 getArg :: YaraParser ByteString
 getArg = do
-      spaces
-      bs <- takeTill isSpace
-      space1 -- Ensures followed by a space
-      return bs
+   spaces
+   bs <- takeTill isSpace
+   space1 -- Ensures followed by a space
+   return bs
 {-# INLINE getArg #-}
 
-showHelp :: ByteString
-showHelp = unlines [
+showHelp :: IO ()
+showHelp = putErr $ unlines [
       "YARA-HS 0.0.1, the pattern matching swiss army knife."
     , "Usage: yara [OPTION]... [NAMESPACE:]RULES_FILE... FILE | DIR | PID"
     , ""
@@ -175,9 +209,9 @@ args = Map.fromList [
     handleModuleData u v = modify $ \e ->
       let new = Map.insert u v (moduleData e) in e { moduleData = new }
     handleIdentifier u = when_ (not $ checkIfIdentifier u) badIdenChars $ modify $ \e ->
-      let new = u <| (onlyIdens e) in e { onlyIdens = new }
+      let new = u <| onlyIdens e in e { onlyIdens = new }
     handleTag u = when_ (checkIfIdentifier u) badIdenChars $ modify $ \e ->
-      let new = u <| (onlyTags e) in e { onlyTags = new }
+      let new = u <| onlyTags e in e { onlyTags = new }
     handleExternalVar u v = case parse value defaultEnv v of
       Done _ i ->  when_ (checkIfIdentifier u) badIdenChars $ modify $ \e ->
                        let new = Map.insert u i (externVars e) in e { externVars = new }
@@ -189,9 +223,6 @@ args = Map.fromList [
 unknownFlag :: ByteString -> YaraParser a
 unknownFlag bs = fault $ "unknown option '" ++ bs ++ "'"
 {-# INLINE unknownFlag #-}
-
-querySingleFlag :: Word8 -> Maybe ArgN
-querySingleFlag w = Map.lookup w $ Map.mapKeysMonotonic fst args
 
 -- | Parse a single flag.
 parseSingleFlag :: YaraParser ()
@@ -213,15 +244,16 @@ parseSingleFlag = do
       -- Identical to Arg1 handling
       b <- not . isSpace <$> peekWord8
       when_ b msg $ join $ liftA2 par getArg getArg
-
-queryDoubleFlag :: ByteString -> Maybe ArgN
-queryDoubleFlag w = Map.lookup w $ Map.mapKeysMonotonic snd args
+  where
+    querySingleFlag :: Word8 -> Maybe ArgN
+    querySingleFlag w = Map.lookup w $ Map.mapKeysMonotonic fst args
 
 -- | Parse a double flag
 -- The line argument is passed in with the "--" already stripped
 parseDoubleFlag :: ByteString -> YaraParser ()
 parseDoubleFlag bs =
-  let (h:hs) = split 61 bs
+  let (_,bs') = splitAt 2 bs
+      (h:hs) = split 61 bs'
       l = length hs
       msg n = unwords ["yara: wrong number of arguments: option", h, "requires", n]
   in case queryDoubleFlag h of
@@ -229,17 +261,22 @@ parseDoubleFlag bs =
     Just (Arg0 _ par)     -> when_ (l == 0) (msg "0") par
     Just (Arg1 _ _ par)   -> when_ (l == 1) (msg "1") $ par (hs !! 0)
     Just (Arg2 _ _ _ par) -> when_ (l == 2) (msg "2") $ par (hs !! 0) (hs !! 1)
+  where
+    queryDoubleFlag :: ByteString -> Maybe ArgN
+    queryDoubleFlag w = Map.lookup w $ Map.mapKeysMonotonic snd args
+
+
+
 
 -- | parseArgs_ actually handles the command line arguments
 parseArgs_ :: YaraParser Env
 parseArgs_ = do
-  --- needs to handle
   w <- getArg
-  let (dh,dt) = splitAt 2 w -- peel off potential "--"
-      (sh,st) = splitAt 1 w
-  if | dh == "--" && dt /= ""    -> parseDoubleFlag dt *> parseArgs_
-     | sh == "-"  && st /= ""    -> parseSingleFlag *> parseArgs_
-     | otherwise                 -> undefined
+  if | isPrefixOf "--" w  -> parseDoubleFlag w *> parseArgs_
+     | isPrefixOf "-"  w  -> parseSingleFlag *> parseArgs_
+     | otherwise          -> do
+         endOfBuffer 
+         
 
 -- | parseArgs initiates the buffer
 parseArgs :: [ByteString] -> Result Env
@@ -259,3 +296,34 @@ parseArgs bs = parse parseArgs_ defaultEnv $ unwords bs
 
 
 -- need a filepath parser.
+
+{-
+-- Few error messages needed below
+
+-- Alas, Haskell doesn't support disjunctive patterns.
+handleArgs :: [ByteString] -> Env -> Conf -> Either ByteString Env
+handleArgs [] env conf
+  | null (_rules env)           = noRules
+  | isNothing $ env ^. _target  = noTarget
+  | otherwise                   = Right env
+handleArgs [a] env conf
+  | null a                      = Left "Empty string got through?"
+  | null $ env ^. _rules        = wrongNumArgs
+  | otherwise                   = Right $ _target .~ a env
+handleArgs (a:as) env conf
+  | take 1 a == "-"  -> unrecognizedFlag (drop 1 a)
+  | otherwise        -> undefined
+  --let u = a <| rules env in handleArgs (env { onlyTags = u }) as
+  where
+
+
+    uncons1 = List.uncons
+    uncons2 cs = go =<< List.uncons cs
+      where go (c,cs) = if null cs then Nothing else Just (c, head cs, tail cs)
+
+    addRule :: Env -> ByteString -> [ByteString] -> Either ByteString Env
+    addRule e b bs = case span (/=0x3A) b of
+      ("", _) -> Left $ "Missing namespace value: " ++ b
+      (rl,"") -> modAs bs (Map.insert rl rl) _rules
+      (ns,rl) -> undefined -- something was found, deal with cases
+-}

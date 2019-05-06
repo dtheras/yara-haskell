@@ -6,10 +6,6 @@
 
 
 
-
-
-
-
 ## Coding Guidlines
 
 - Any function used within only one function body should be placed in a '''where''' clause, unless its unreadable. Simply because a function is general. Cluttering up top level definitions is messy. 

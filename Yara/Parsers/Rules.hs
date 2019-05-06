@@ -2,8 +2,6 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE BlockArguments #-}
-
-{-# LANGUAGE BangPatterns #-}
 {-Zip -- haskell lib
 
 based on LibZip
@@ -130,15 +128,24 @@ ruleType = do
         private = string "private" *> space1 $> Private
 
 -- PARSE RULE BLOCK
-
+-- YARA rules consist of:
+--    - Possible keyword of "global" and/or "private"
+--    - "rule" keyword
+--    - Possible semicolon, followed by space seperated tags
+--    - open curl bracket
+--    - metadata block
+--    - strings block
+--    - conditions block (depends on the strings block)
 parseRuleBlock :: YaraParser (Seq.Seq ())
 parseRuleBlock = do
+  env <- get
+  let keep_meta = printMetadata env
   ty <- ruleType
   string "rule"
   id <- skipTo1 identifier
   tg <- option [""] (colon *> tags)
   oCurl
-  meta
+  meta <- parseMetadata keep_meta
   ss <- block "strings" patterns
   -- >>= (block "condition:") . conditions
   cCurl
@@ -252,50 +259,18 @@ fileSize = do
                 , foldMap string ["MB", "mb", "Mb"] $> 1000000
                 , foldMap string ["GB", "gb", "Gb"] $> 1000000000 ])
 
-data RelOp = RelOp_LEQ
-           | RelOp_LT
-           | RelOp_EQ
-           | RelOp_GT
-           | RelOp_GEQ
+data RelOp = RelOpLEQ
+           | RelOpLT
+           | RelOpEQ
+           | RelOpGT
+           | RelOpGEQ
 
 relOp :: YaraParser RelOp
-relOp = asum [ lt $> RelOp_LT
-               , gt $> RelOp_GT
-               , eq *> eq $> RelOp_EQ
-               , gt *> eq $> RelOp_GEQ
-               , lt *> eq $> RelOp_LEQ ]
-
-
-
--- Few error messages needed below
-
--- Alas, Haskell doesn't support disjunctive patterns.
-handleArgs :: [ByteString] -> Env -> Conf -> Either ByteString Env
-handleArgs [] env conf
-  | null (_rules env)           = noRules
-  | isNothing $ env ^. _target  = noTarget
-  | otherwise                   = Right env
-handleArgs [a] env conf
-  | null a                      = Left "Empty string got through?"
-  | null $ env ^. _rules        = wrongNumArgs
-  | otherwise                   = Right $ _target .~ a env
-handleArgs (a:as) env conf  = case a !! 1 of
-  _ -> if
-     | take 1 a == "-"  -> unrecognizedFlag (drop 1 a)
-     | otherwise        -> undefined
-  --let u = a <| rules env in handleArgs (env { onlyTags = u }) as
-  where
-
-
-    uncons1 = List.uncons
-    uncons2 cs = go =<< List.uncons cs
-      where go (c,cs) = if null cs then Nothing else Just (c, head cs, tail cs)
-
-    addRule :: Env -> ByteString -> [ByteString] -> Either ByteString Env
-    addRule e b bs = case span (/=0x3A) b of
-      ("", _) -> Left $ "Missing namespace value: " ++ b
-      (rl,"") -> modAs bs (Map.insert rl rl) _rules
-      (ns,rl) -> undefined -- something was found, deal with cases
+relOp = asum [ lt $> RelOpLT
+               , gt $> RelOpGT
+               , eq *> eq $> RelOpEQ
+               , gt *> eq $> RelOpGEQ
+               , lt *> eq $> RelOpLEQ ]
 
 
 
@@ -319,7 +294,7 @@ notFollowedBy' p  = try $ join $  do  a <- try p
 
 
 
-launch :: IO (ExitCode)
+launch :: IO (Env, ExitCode)
 launch = do
   res <- parseArgs `liftM` getArgs
   case res of
@@ -329,8 +304,11 @@ launch = do
 
 
 main :: IO ()
-main = do
-  launch >>= \case
-    ExitSuccess   -> return () {- if show help true, do so, else if show version true do so, otherwise proceeed-}
+main =
+  (env,ec) <- launch
+  case ec of
+    ExitSuccess   -> if showHelp env == True
+      then undefined
+      else undefined {- if show help true, do so, else if show version true do so, otherwise proceeed-}
     ExitFailure 0 -> return ()
     ExitFailure 1 -> return ()

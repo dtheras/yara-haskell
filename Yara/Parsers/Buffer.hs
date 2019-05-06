@@ -113,6 +113,7 @@ substring (Pos s) (Pos l) (Buf fp off len _ _) =
   PS fp (off+s) l
 {-# INLINE substring #-}
 
+{-
 unBuffer :: Buffer -> ByteString
 unBuffer (Buf fp off len _ _) = PS fp off len
 {-# INLINE unBuffer #-}
@@ -120,3 +121,4 @@ unBuffer (Buf fp off len _ _) = PS fp off len
 
 bufferFrontAppend :: ByteString -> Buffer -> Buffer
 bufferFrontAppend bs buf = bufferPappend (toBuffer bs) (unBuffer buf)
+-}

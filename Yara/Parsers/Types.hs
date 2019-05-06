@@ -20,6 +20,7 @@
 module Types
   ( (++)
   , liftA2
+  , putErr
   , FilePath
   , Result(..)
   , More(..)
@@ -39,8 +40,6 @@ module Types
   , maxArgsExternVar
   , maxArgsModuleData
   , fault
-
-  -- Re-exporting. 
   , (<|>)
   ) where
 
@@ -49,14 +48,21 @@ import Control.Applicative hiding (liftA2)
 import Control.DeepSeq
 import Control.Monad.Reader
 import Control.Monad.State.Strict
-import Data.ByteString.Char8 (append, pack)
+import Data.ByteString.Char8 --(append, pack)
 import Data.ByteString.Internal (ByteString(..))
+import Data.Functor
 import Data.String
 import GHC.Word
 import Foreign.ForeignPtr
+import System.IO (stderr)
 
 import qualified Data.Map      as Map
 import qualified Data.Sequence as Seq
+
+maxArgsTag = 32
+maxArgsIdentifier = 32
+maxArgsExternVar = 32
+maxArgsModuleData = 32
 
 infixl 5 ++
 (++) :: ByteString -> ByteString -> ByteString
@@ -69,6 +75,9 @@ liftA2 f a b = do
   !y <- b
   pure $ f x y
 {-# INLINE liftA2 #-}
+
+putErr :: ByteString -> IO ()
+putErr = hPutStrLn stderr
 
 -- GENERAL TYPE & INSTANCES
 
@@ -201,18 +210,6 @@ defaultEnv = Env {
   , printHelp = False
   }
 
-maxArgsTag :: Int
-maxArgsTag = 32
-
-maxArgsIdentifier :: Int
-maxArgsIdentifier = 32
-
-maxArgsExternVar :: Int
-maxArgsExternVar = 32
-
-maxArgsModuleData :: Int
-maxArgsModuleData = 32
-
 -- YARAPARSER TYPE & INSTANCES
 
 newtype YaraParser a = YaraParser {
@@ -235,7 +232,7 @@ instance Applicative YaraParser where
   {-# INLINE (<*>) #-}
   m *> k = m >>= \_ -> k
   {-# INLINE (*>) #-}
-  x <* y = x >>= \a -> y *> pure a
+  x <* y = x >>= \a -> y $> a
   {-# INLINE (<*) #-}
 
 instance Alternative YaraParser where
@@ -302,3 +299,19 @@ instance MonadReader Env YaraParser where
   {-# INLINE local #-}
   reader fun = YaraParser $ \e b !p m _ s -> s b p m (fun e)
   {-# INLINE reader #-}
+
+
+
+
+data PkgName = ByteString
+
+data Name = LocalName ByteString
+          | CmdName ByteString
+          | ImportName NameSpace PkgName ByteString
+
+
+data NameSpace = VarName        -- ^ Variables
+               | DataName       -- ^ Data constructors
+               | TcClsName      -- ^ Type constructors and classes; Haskell has them
+                                -- in the same name space for now.
+               deriving( Eq, Ord, Show{-, Data , Generic-} )
