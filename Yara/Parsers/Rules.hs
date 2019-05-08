@@ -8,34 +8,33 @@ based on LibZip
 This is a binding to C library libzip.-}
 module Rules where
 
-import Prelude hiding ((++), takeWhile, unlines, quot, sequence,
+import Prelude hiding ((++), takeWhile, unlines, quot, sequence, null,
                        unwords, putStrLn, replicate, replicate, head,
-                       FilePath, span, all, take, drop, concat)
-import Data.ByteString hiding (cons,uncons,foldl1, foldl, foldr1, putStrLn,
-                               zip, map, replicate, takeWhile, empty, null,
-                               elem, count, tail, length, unpack)
-import Data.ByteString.Char8 (intercalate, unpack, unlines, unwords)
-import Control.Applicative
+                       FilePath, span, all, take, drop, concat, length)
+import Data.ByteString hiding (foldl1, foldl, foldr1, putStrLn,
+                               zip, map, replicate, takeWhile, empty,
+                               elem, count, tail, unpack)
+--import Data.ByteString.Char8 (intercalate, unpack, unlines, unwords)
+--import Control.Applicative hiding (liftA2)
 import Control.Monad
-import Data.Functor
-import Data.Maybe
+--import Data.Maybe
 import GHC.Word
-import System.Exit
-import System.Posix.Env.ByteString
+--import System.Exit
+--import System.Posix.Env.ByteString
 import Text.Regex.Posix.Wrap
 import Text.Regex.Posix -- Needed only for typeclass witnesses
-import Control.Lens.TH
-import Control.Lens
 
-import qualified Data.List      as List
+
 import qualified Data.Map       as Map
 import qualified Data.Sequence  as Seq
 import qualified Data.Set       as Set
 
 import Args
 import Buffer
+import Combinators
 import Types
-import Utils
+import Utilities
+
 
 {- These are here since they are in transition and constantly changing. Saves from switching back and forth between documents.  -}
 type RuleBlock = Map.Map Identifier [ByteString -> Bool]
@@ -90,25 +89,31 @@ yaraKeywords = Set.fromDistinctAscList [
 -- IDENTIFIERS
 
 isUnderscore, isLeadingByte, isIdByte :: Word8 -> Bool
-isUnderscore  = (==) 0x5F
+isUnderscore  = (== 95)
 isLeadingByte = isAlpha <> isUnderscore
 isIdByte      = isAlphaNum <> isUnderscore
 
-{- needs to be altered ONLY read up to 128 and no more. Otherwise
-any extra bytes must be loaded in to memory first. Should be doable
-with the 'scan' function that keeps track of 'state' as being
-number of bytes read to point. -}
+-- | Parses an identifier.
+-- Meets specification of reading only up to 128 bytes
 identifier :: YaraParser Identifier
 identifier = do
-  ls <- liftM2 cons leadByte idBytes
-  guard (Set.notMember ls yaraKeywords)
-  guard (length ls <= 128)
-  return ls
+  w <- satisfy isLeadingByte
+  rest <- scan 0 pred
+  -- Simply an underscore or digit is not an acceptable identifier
+  guard $ null rest && (isUnderscore w || isDigit w)
+  let iden = w <+ rest
+  guard $ Set.notMember iden yaraKeywords
+  return iden
   <?> "identifier"
   where
-    underscore = (==) 0x5F
-    leadByte = satisfy isLeadingByte
-    idBytes = takeWhile isIdByte
+    -- Read only upto 127 identifier bytes
+    -- (127 since already parsed leading byte)
+    pred :: Int -> Word8 -> Maybe Int
+    pred n w
+          | n < 0 || 127 <= n  = Nothing
+          | isIdByte w         = Just $ n + 1
+          | otherwise          = Nothing
+
 
 checkIfIdentifier :: ByteString -> Bool
 checkIfIdentifier bs = case uncons bs of
@@ -118,15 +123,21 @@ checkIfIdentifier bs = case uncons bs of
                         && Set.notMember bs yaraKeywords
 
 ruleType :: YaraParser RuleType
-ruleType = do
-  c <- peekWord8
-  case c of
-    103 -> global <> option Normal private
-    112 -> private <> option Normal global
-    _   -> return Normal
-  where global = string "global" *> space1 $> Global
-        private = string "private" *> space1 $> Private
+ruleType = peekWord8 >>= \case
+  114 -> rule $> Normal
+  103 -> (global <^> option Normal private) <* rule
+  112 -> (private <^> option Normal global) <* rule
+  _   -> fault =<< (\w ->
+           "Encountered unexpected byte at '" ++ w ++ "'") <$> getPosByteStringP1
+  <?> "ruleType"
+  where global = string "global" <* space1 $> Global <?> "global"
+        private = string "private" <* space1 $> Private <?> "private"
+        rule = string "rule" <?> "rule"
 
+
+tags :: YaraParser [Identifier]
+tags =  sepBy identifier space1
+{-
 -- PARSE RULE BLOCK
 -- YARA rules consist of:
 --    - Possible keyword of "global" and/or "private"
@@ -136,12 +147,11 @@ ruleType = do
 --    - metadata block
 --    - strings block
 --    - conditions block (depends on the strings block)
-parseRuleBlock :: YaraParser (Seq.Seq ())
+parseRuleBlock :: YaraParser ()
 parseRuleBlock = do
   env <- get
   let keep_meta = printMetadata env
   ty <- ruleType
-  string "rule"
   id <- skipTo1 identifier
   tg <- option [""] (colon *> tags)
   oCurl
@@ -149,15 +159,14 @@ parseRuleBlock = do
   ss <- block "strings" patterns
   -- >>= (block "condition:") . conditions
   cCurl
-  return $ singleton () -- Data.Map.empty <?> "Parse Rule Block"
+  return $ Seq.singleton () -- Data.Map.empty <?> "Parse Rule Block"
   where
     block :: ByteString -> YaraParser a -> YaraParser (Seq.Seq a)
     block s p = do
       string s <* colon
       skipTo $ sepBy p space1
 
-tags :: YaraParser [Identifier]
-tags = flank space1 $ sepBy identifier space1
+
 
 meta :: YaraParser ()
 meta = void $ do
@@ -184,7 +193,7 @@ regex = (=~~) regex' <?> "error building regex map"
 -- HEX
 
 hexPr :: YaraParser HexTokens
-hexPr = singleton . uncurry Pair <$> (hexDigit `pair` hexDigit)
+hexPr = Seq.singleton . uncurry Pair <$> (hexDigit `pair` hexDigit)
      where hexDigit = satisfy $ \w -> w == 63 || w - 48 <=  9
                               || w - 97 <= 25 || w - 65 <= 25
 
@@ -193,7 +202,7 @@ hexJump = between sqBra sqKet $ do
   l <- optional decimal
   flank space dash
   u <- optional decimal
-  return $ maybe Seq.empty singleton $ if
+  return $ maybe Seq.empty Seq.singleton $ if
     | isNothing l && isNothing u  -> IJmp 0
     | isNothing l                 -> RJmp 0 <$> u
     | isNothing u                 -> IJmp <$> l
@@ -312,3 +321,4 @@ main =
       else undefined {- if show help true, do so, else if show version true do so, otherwise proceeed-}
     ExitFailure 0 -> return ()
     ExitFailure 1 -> return ()
+-}

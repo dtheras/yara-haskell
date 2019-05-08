@@ -3,7 +3,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE Rank2Types #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE ApplicativeDo #-}
+{-# LANGUAGE CPP #-}
 
 -- |
 -- Module      :  Yara.Parsers.Types
@@ -18,10 +18,7 @@
 -- based on the Attoparsec library.
 
 module Types
-  ( (++)
-  , liftA2
-  , putErr
-  , FilePath
+  ( FilePath
   , Result(..)
   , More(..)
   , Pos(..)
@@ -48,36 +45,26 @@ import Control.Applicative hiding (liftA2)
 import Control.DeepSeq
 import Control.Monad.Reader
 import Control.Monad.State.Strict
-import Data.ByteString.Char8 --(append, pack)
+import Data.ByteString (cons, snoc)
+import Data.ByteString.Char8 hiding (cons, snoc)
 import Data.ByteString.Internal (ByteString(..))
-import Data.Functor
-import Data.String
+import Data.String ()
 import GHC.Word
 import Foreign.ForeignPtr
-import System.IO (stderr)
 
 import qualified Data.Map      as Map
 import qualified Data.Sequence as Seq
+
+import Utilities
+
+-- CONSTANSTS
 
 maxArgsTag = 32
 maxArgsIdentifier = 32
 maxArgsExternVar = 32
 maxArgsModuleData = 32
 
-infixl 5 ++
-(++) :: ByteString -> ByteString -> ByteString
-(++) = append
-{-# INLINE (++) #-}
 
-liftA2 :: (Applicative f) => (a -> b -> c) -> f a -> f b -> f c
-liftA2 f a b = do
-  x <- a
-  !y <- b
-  pure $ f x y
-{-# INLINE liftA2 #-}
-
-putErr :: ByteString -> IO ()
-putErr = hPutStrLn stderr
 
 -- GENERAL TYPE & INSTANCES
 
@@ -99,8 +86,7 @@ instance Semigroup RuleType where
   Normal  <> m        = m
   n       <> Normal   = n
 
-instance Semigroup Bool where
-  (<>) = (||)
+
 
 -- BUFFER TYPE
 
@@ -154,7 +140,7 @@ data Env = Env {
   , onlyTags          :: !(Seq.Seq Label)
   , onlyIdens         :: !(Seq.Seq Label)
   , atomTable         :: Maybe FilePath
-  , maxRules          :: Int
+  , maxRules          :: Word8
   , timeout           :: Int
   , maxStrPerRule     :: Int
   , stackSize         :: Int
@@ -299,9 +285,6 @@ instance MonadReader Env YaraParser where
   {-# INLINE local #-}
   reader fun = YaraParser $ \e b !p m _ s -> s b p m (fun e)
   {-# INLINE reader #-}
-
-
-
 
 data PkgName = ByteString
 

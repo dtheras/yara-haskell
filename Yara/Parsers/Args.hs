@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE LambdaCase #-}
+
 -- |
 -- Module      :  Yara.Parsing.Args
 -- Copyright   :  David Heras 2018-2019
@@ -12,9 +13,11 @@
 -- Portability :  unknown
 --
 -- Parse and handle command line arguments
+
 module Args (parseArgs , showHelp) where
 
-import Prelude hiding ((++), takeWhile, reverse, all, unlines, unwords, head, take, drop, concat, splitAt)
+import Prelude hiding ((++), takeWhile, reverse, all, unlines, unwords,
+                       head, take, drop, concat, splitAt)
 import Data.ByteString hiding (takeWhile, elem, length)
 import Data.ByteString.Char8 (unlines, unwords)
 import Data.Sequence ((<|))
@@ -22,14 +25,15 @@ import Control.Monad.State.Strict
 import GHC.Word
 
 import qualified Data.Map.Strict as Map
-import qualified Data.Sequence as Seq
 
-import Types
-import Utils
 import Buffer
+import Combinators
+import Types
+import Utilities
 
 {-- SHOULD BE MOVED TO RULES AND IMPORTED. FOR NOW> ---}
 import qualified Data.Set as Set
+
 
 isUnderscore, isLeadingByte, isIdByte :: Word8 -> Bool
 isUnderscore  = (==) 0x5F
@@ -59,41 +63,54 @@ yaraKeywords = Set.fromDistinctAscList [
 
 {----------------------}
 
-
-
-
-{- This should be moved to Args.hs soon/eventually. But since quoted filepaths
-as well as unquoted can be passed into the command line, we need to handle both
-but those unquoted ones have to be parsed differently since spaces have to
-be escaped themselves
-
--- we are not allowing newline characters. its easier. must be oneline. can allow
--- any visible character. except space. which must be escaped
-NOTE: remember this is a parser for a filepath entered into the command line!-}
-filepath :: YaraParser ByteString
+isWindows :: Bool
 #if defined(mingw32_HOST_OS) || defined(__MINGW32__)
-filepath = undefined
+isWindows = True
 #else
+isWindows = False
+#endif
+{-# INLINE isWindows #-}
+
+-- Doesn't accept non-visible characters for Windows or Posix
+-- Windows excludes:  <  >  :  "  /  \  |  ?  *
+filepathByte :: Word8 -> Bool
+filepathByte w = if isWindows
+  then w - 35 <= 6 || w - 43 <= 3 || w - 48 <= 9 || w == 59
+                          || w == 61 || w - 64 <= 27 || w == 93
+                          || w - 95 <= 28 || w == 123 || w == 126
+  else w - 33 <= 58 || w - 93 <= 33
+{-# INLINE filepathByte #-}
+
+-- Parse an unquoted-style filepath passed into the command line
+-- No size limit is imposed.
+-- Loaded with errors.
+filepath :: YaraParser ByteString
 filepath = go ""
   where
     go acc = do
-      bs <- takeWhile $ \w -> w - 21 <= 70 || w - 93 <= 33
-      let acc_ = reverse bs ++ acc
-      peekWord8 >>= \case
-        20 -> return acc_
-        92 -> do
-          r <- anyWord8
-          s <- anyWord8
-          if s == 20
-            then go $ singleton s ++ acc_
-            else go $ pack [s, r] ++ acc_
-        _  -> do
-          r <- singleton <$> anyWord8
-          fault $ "Unrecognized filepath character: " ++ r
+      bs <- takeWhile filepathByte
+      let acc' = acc ++ bs
+      end <- atEnd
+      if end
+        then return acc'
+        else peekWord8 >>= \case
+#if defined(mingw32_HOST_OS) || defined(__MINGW32__)
+          58 -> if null acc 
+            then do
+              c <- anyWord8
+              go $ acc' +> c
+            else badFPByte 58
 #endif
+          32 -> return acc'
+          92 -> do
+            r <- anyWord8
+            s <- anyWord8
+            if s == 20
+              then go $ acc' +> s -- No need to keep escape any longer
+              else go $ acc' +> r +> s
+          _  -> badFPByte =<< anyWord8
+    badFPByte = fault . (+>) "Unrecognized filepath character: "
 {-# INLINE filepath #-}
-
-
 
 value :: YaraParser Value
 value = Value_B <$> bool <|> Value_I <$> decimal <|> Value_S <$> takeWhile (const True)
@@ -119,8 +136,12 @@ getArg :: YaraParser ByteString
 getArg = do
    spaces
    bs <- takeTill isSpace
+   --case last bs of
+     --backslash then ->
+     -- otherwise
    space1 -- Ensures followed by a space
    return bs
+   -- may need another "go" function
 {-# INLINE getArg #-}
 
 showHelp :: IO ()
@@ -137,12 +158,11 @@ showHelp = putErr $ unlines [
 showArgs :: ByteString
 showArgs = Map.foldlWithKey go "" args
   where untabs = intercalate "\t"
-        eqs = intercalate "="
-        go acc (s,d) arg = acc ++ untabs ["  -" ++ singleton s, df, g ++ "\n"]
-                       where (df,g) = case arg of
-                               (Arg0 h _)     -> (eqs["--" ++ d], h)
-                               (Arg1 h l _)   -> (eqs["--" ++ d,l], h)
-                               (Arg2 h l m _) -> (eqs["--" ++ d,l,m], h)
+        go acc (s,d) arg = acc ++ untabs ["  -" +> s, df, g ++ "\n"]
+          where (df,g) = case arg of
+                  (Arg0 h _)     -> ("--" ++ d                        , h)
+                  (Arg1 h l _)   -> ("--" ++ d ++ "=" ++l             , h)
+                  (Arg2 h l m _) -> ("--" ++ d ++ "=" ++ l ++ "=" ++ m, h)
 {-# INLINE showArgs #-}
 
 data ArgN = Arg0 ByteString             (YaraParser ())
@@ -230,7 +250,7 @@ parseSingleFlag = do
   -- Since command line arguments are stored in the parser
   -- buffer, we pull the next character
   s <- anyWord8
-  let msg = "option `-" ++ singleton s ++ "` requires an argument"
+  let msg = "option `-" +> s ++ "` requires an argument"
   case querySingleFlag s of
     Nothing             -> unknownFlag $ singleton s
     Just (Arg0 _ par)   -> par
@@ -274,9 +294,10 @@ parseArgs_ = do
   w <- getArg
   if | isPrefixOf "--" w  -> parseDoubleFlag w *> parseArgs_
      | isPrefixOf "-"  w  -> parseSingleFlag *> parseArgs_
-     | otherwise          -> do
-         endOfBuffer 
-         
+     | otherwise          -> --do
+         --b <- atEnd
+         undefined
+
 
 -- | parseArgs initiates the buffer
 parseArgs :: [ByteString] -> Result Env

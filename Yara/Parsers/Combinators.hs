@@ -9,13 +9,17 @@
 {-# ANN module "HLint: ignore Eta reduce" #-}
 #endif
 
-module Utils
-  (
-    (<?>)
+module Combinators
+  ( (<?>)
   , (<^>)
   , pair
   , parse
   , advance
+  , atEnd
+  , endOfInput
+  , getPos
+  , getPosByteString
+  , getPosByteStringP1
 
   -- Parser Predicates
   , isAlpha
@@ -34,7 +38,6 @@ module Utils
   , space1
   , spaces
   , word8
-  , anyWord8
 
   -- Specific character parsers
   , openCurl
@@ -65,43 +68,36 @@ module Utils
   , strings
   , stringIgnoreCase
   , bool
-
+  , scan
   ) where
 
 import Prelude hiding (map, null, drop, takeWhile, length, (++),
                        concat, reverse)
-import Control.Monad.Reader (replicateM, void, when)
+import Control.Monad.Reader
 import Control.Applicative hiding (liftA2)
 import Data.Bits
 import Data.ByteString hiding (count, elem, empty, foldr, append, takeWhile)
 import qualified Data.ByteString as BS (takeWhile)
+import Data.ByteString.Builder (toLazyByteString, intDec)
 import qualified Data.ByteString.Char8 as C8
+import Data.ByteString.Internal (ByteString(..))
+import qualified Data.ByteString.Lazy as L (toStrict)
 import Data.ByteString.Unsafe
-import Data.Functor
-import qualified Data.List as List
+--import Data.Functor
 import Data.String (IsString(..))
 import GHC.Word
-
+import Foreign hiding (void)
 import qualified Data.Sequence as Seq
 
 import Types
 import Buffer
-
+import Utilities
 
 infix 0 <?>
 infixr 2 <^>
 
 instance (a ~ ByteString) => IsString (YaraParser a) where
     fromString = string . C8.pack
-
--- | Concatenate a monoid after reversing its elements.  Used to
--- glue together a series of textual chunks that have been accumulated
--- \"backwards\".
-concatReverse :: Monoid m => [m] -> m
-concatReverse [x] = x
-concatReverse xs  = mconcat (List.reverse xs)
-{-# INLINE concatReverse #-}
-
 
 
 --- RUNNING A PARSER
@@ -116,10 +112,63 @@ parse_ :: YaraParser a -> ByteString -> Result a
 parse_ par bs = parse par defaultEnv bs
 {-# INLINE parse_ #-}
 
+
 advance :: Int -> YaraParser ()
 advance n = YaraParser $ \_ t pos more _lose suc ->
   suc t (pos + Pos n) more ()
 {-# INLINE advance #-}
+
+-- | Return current position.
+getPos :: YaraParser Int
+getPos = YaraParser $ \_ b !p m _ s -> s b p m $ fromPos p
+{-# INLINE getPos #-}
+
+-- | Convert int to a bytestring.
+-- Not exported.
+-- Fairly ugly and uses the really slow 'toStrict', but even if parsing a 100,00
+-- word novel, at over-estimate of 7 characters a word, leaves us
+-- converting a number less than 850,000 into a bytestring, max. That is utterly
+-- dwarfed by the actual loading into the buffer "War & Peace."
+int2bs :: Int -> ByteString
+int2bs =  L.toStrict . toLazyByteString . intDec
+{-# INLINE int2bs #-}
+
+-- | Return current position as a ByteString.
+--
+-- Used for returning location in printable format.
+getPosByteString :: YaraParser ByteString
+getPosByteString = int2bs <$> getPos
+{-# INLINE getPosByteString #-}
+
+-- | Return current position plus 1 as a ByteString.
+-- Specifically written to be used in combination with matching cases on
+-- 'peekWord8'. So when reporting a parsing issue on that peeked word, reporting
+-- refelects an accurate position
+getPosByteStringP1 :: YaraParser ByteString
+getPosByteStringP1 = int2bs . (+1) <$> getPos
+{-# INLINE getPosByteStringP1 #-}
+
+-- | This parser always succeeds.  It returns 'True' if the end
+-- of all input has been reached, and 'False' if any input is available
+atEnd :: YaraParser Bool
+atEnd = YaraParser $ \_ t pos more _lose suc ->
+  if | pos < (Pos $ bufferLength t) -> suc t pos more False
+     | more == Complete    -> suc t pos more True
+     | otherwise -> let lose' t' pos' more' = suc t' pos' more' True
+                        suc' t' pos' more'  = suc t' pos' more' False
+                    in prompt t pos more lose' suc'
+{-# INLINE atEnd #-}
+
+-- | Match only if all input has been consumed.
+endOfInput :: YaraParser ()
+endOfInput = YaraParser $ \e t pos more lose suc ->
+  if | pos < (Pos $ bufferLength t) -> lose t pos more [] "endOfInput"
+     | more == Complete -> suc t pos more ()
+     | otherwise ->  let lose' t' pos' more' _ctx _msg = suc t' pos' more' ()
+                         suc' t' pos' more' _a = lose t' pos' more' [] "endOfInput"
+                     in  runParser demandInput e t pos more lose' suc'
+{-# INLINE endOfInput #-}
+
 
 
 
@@ -196,7 +245,7 @@ count = replicateM
 
 
 
--- PARSE SPECIFIC CHARACTERS
+-- SPECIFIC WORD8 PARSERS
 
 openCurl :: YaraParser Word8
 openCurl = word8 123
@@ -335,7 +384,7 @@ endOfLine = void (word8 10) <|> void (string "\r\n")
 
 -- | Match any byte except the given one.
 notWord8 :: Word8 -> YaraParser Word8
-notWord8 c = satisfy (/= c) <?> "not " ++ singleton c
+notWord8 c = satisfy (/= c) <?> "not '" +> c ++ "'"
 {-# INLINE notWord8 #-}
 
 alphaNum :: YaraParser Word8
@@ -360,7 +409,7 @@ horizontalSpace = satisfy isHorizontalSpace <?> "horizontalSpace"
 
 
 
---- | USEFUL PARSERS
+--- | PARSER COMBINATORS
 
 -- | The parser @skip p@ succeeds for any byte for which the predicate
 -- @p@ returns 'True'.
@@ -380,13 +429,11 @@ skipTo :: YaraParser a -> YaraParser a
 skipTo p = takeWhile isHorizontalSpace *> p
 {-# INLINE skipTo #-}
 
-
 -- | skipTo1
 -- same as skipTo but requires the occurance of atleast 1 horizonal space
 skipTo1 :: YaraParser a -> YaraParser a
 skipTo1 p = takeWhile1 isHorizontalSpace *> p
 {-# INLINE skipTo1 #-}
-
 
 -- | skipToLn
 -- gobbles up all whitespace, including newlines, then applyies parser
@@ -394,17 +441,16 @@ skipToLn :: YaraParser a -> YaraParser a
 skipToLn p = takeWhile isSpace *> p
 {-# INLINE skipToLn #-}
 
-
 -- | skipToLn1
 -- | sames as skipToLn but requiring atleast one whitespace occurance
 skipToLn1 :: YaraParser a -> YaraParser a
 skipToLn1 p = takeWhile1 isSpace *> p
 {-# INLINE skipToLn1 #-}
 
-
 hexadecimal :: (Integral a, Bits a) => YaraParser a
 hexadecimal = foldl' step 0 `fmap` takeWhile1 isHexDigit
   where
+    isHexDigit :: Word8 -> Bool
     isHexDigit w = (w >= 48 && w <= 57) ||
                    (w >= 97 && w <= 102) ||
                    (w >= 65 && w <= 70)
@@ -414,7 +460,6 @@ hexadecimal = foldl' step 0 `fmap` takeWhile1 isHexDigit
 {-# SPECIALISE hexadecimal :: YaraParser Int #-}
 {-# SPECIALISE hexadecimal :: YaraParser Integer #-}
 {-# SPECIALISE hexadecimal :: YaraParser Word #-}
-
 
 decimal :: Integral a => YaraParser a
 decimal = foldl' step 0 `fmap` takeWhile1 isDigit
@@ -429,7 +474,7 @@ skipWhile p = go
  where
   go = do
     t <- BS.takeWhile p <$> getBuff
-    continue <- inputSpansChunks (length t)
+    continue <- atleastBytesLeft (length t)
     when continue go
 {-# INLINE skipWhile #-}
 
@@ -440,7 +485,7 @@ takeTill p = takeWhile (not . p)
 takeWhile :: (Word8 -> Bool) -> YaraParser ByteString
 takeWhile p = do
     s <- BS.takeWhile p <$> getBuff
-    continue <- inputSpansChunks (length s)
+    continue <- atleastBytesLeft (length s)
     if continue
       then takeWhileAcc p [s]
       else return s
@@ -466,7 +511,7 @@ takeWhileAcc p = go
  where
   go acc = do
     s <- BS.takeWhile p <$> getBuff
-    continue <- inputSpansChunks (length s)
+    continue <- atleastBytesLeft (length s)
     if continue
       then go (s:acc)
       else return $ concatReverse (s:acc)
@@ -497,22 +542,20 @@ grouping p = between openParen closeParen $ interleaved vertBar p
 {-# INLINE grouping #-}
 
 -- | litString parses a literal string
--- Strings can contain the following escape bytes: \" \\ \t \n \r
--- Handles string breaks.
---  > "this is a string on \
---  >      two seperate lines"
--- Returns the content of the string (without the quotation bytes)
+-- Strings can contain the following escape bytes \" \\ \t \n \r and handle
+-- string line breaks.
+-- Returns the content of the string without the quotation bytes.
 litString :: YaraParser ByteString
 litString = quote *> (go "") <* quote <?> "litString"
   where
     go acc = do
       -- Take till a quote, newline, or backslash
       bs <- takeTill $ \q -> elem q [92, 34, 10]
-      let acc_ = reverse bs ++ acc
+      let acc_ = acc ++ bs
       peekWord8 >>= \case
         -- If unescaped quote, we've reached the end of the string.
         -- The accumulation is stored in reverse until returned
-        34 -> return $ reverse acc_
+        34 -> return acc_
         -- If new line, fault since string was not closed.
         10 -> fault "string was not closed"
         -- If backslash, check next byte.
@@ -521,7 +564,7 @@ litString = quote *> (go "") <* quote <?> "litString"
           s <- anyWord8
              -- If next is a slash of quote, then we append.
              -- NOTE: the appending in reverse. 
-          if | s == 34 || s == 92 -> go $ pack [s, r] ++ acc_
+          if | s == 34 || s == 92 -> go $ acc_ +> r +> s
              -- When there is a space after a slash, may have
              -- a string break among multiple lines, but a few empty
              -- spaces follow
@@ -529,35 +572,19 @@ litString = quote *> (go "") <* quote <?> "litString"
                  takeWhile isHorizontalSpace
                  endOfLine
                  takeWhile isHorizontalSpace
-                 n <- singleton <$> satisfy notSpace
-                 go $ n ++ acc_
+                 n <- satisfy notSpace
+                 go $ acc_ +> n
              -- Handles the case that there is a newline immediately after
              -- the escape slash.
              | 10 == s -> do
                  takeWhile isHorizontalSpace
-                 n <- singleton <$> satisfy notSpace
-                 go $ n ++ acc_
+                 n <- satisfy notSpace
+                 go $ acc_ +> n
              -- Anyother is not supported.
-             | otherwise -> fault $ "Unrecognized escape char: " ++ singleton s
+             | otherwise -> fault $ "Unrecognized escape char: " +> s
         -- Shuts up incomplete-patterns
         _  -> fault "How did you get here?"
     notSpace = not . isSpace
-
-{-
--- The following it to test the above literal string parser. In case changes are
--- introduced, we should not the return results.
-test_litString :: IO ()
-test_litString =
-  s <- C8.readFile "Test_text.txt"
-  Prelude.putStrLn $ show s
-  Data.ByteString.putStrLn s
-  Prelude.print $ parse (do b <- litString
-                            _ <- endOfLine
-                            return b)
-                        defaultEnv
-                        s
--}
-
 
 -- MATCH STRINGS
 
@@ -643,15 +670,15 @@ prompt t pos _more lose suc = Partial $ \s ->
   else suc (bufferPappend t s) pos Incomplete
 {-# INLINE prompt #-}
 
-inputSpansChunks :: Int -> YaraParser Bool
-inputSpansChunks i = YaraParser $ \_ t pos_ more _lose suc ->
+atleastBytesLeft :: Int -> YaraParser Bool
+atleastBytesLeft i = YaraParser $ \_ t pos_ more _lose suc ->
   let pos = pos_ + Pos i
   in if fromPos pos < bufferLength t || more == Complete
      then suc t pos more False
      else let lose' t' pos' more' = suc t' pos' more' False
               suc'  t' pos' more' = suc t' pos' more' True
           in prompt t pos more lose' suc'
-{-# INLINE inputSpansChunks #-}
+{-# INLINE atleastBytesLeft #-}
 
 ensureSuspended :: Env -> Int -> Buffer -> Pos -> More
                 -> Failure r
@@ -674,10 +701,6 @@ ensure n = YaraParser $ \e t pos more lose suc ->
     -- The uncommon case is kept out-of-line to reduce code size:
     else ensureSuspended e n t pos more lose suc
 {-# INLINE ensure #-}
-
-
-
-
 
 -- | Match a specific string.
 string :: ByteString -> YaraParser ByteString
@@ -706,6 +729,52 @@ bool = peekWord8 >>= \case
   _   -> fail "bool"
   <?> "bool"
 {-# INLINE bool #-}
+
+data T s = T {-# UNPACK #-} !Int s
+
+scan_ :: (s -> [ByteString] -> YaraParser a) -> s -> (s -> Word8 -> Maybe s)
+         -> YaraParser a
+scan_ f s0 p = go [] s0
+ where
+  go acc s1 = do
+    let scanner (PS fp off len) =
+          withForeignPtr fp $ \ptr0 -> do
+            let start = ptr0 `plusPtr` off
+                end   = start `plusPtr` len
+                inner ptr !s
+                  | ptr < end = do
+                    w <- peek ptr
+                    case p s w of
+                      Just s' -> inner (ptr `plusPtr` 1) s'
+                      _       -> done (ptr `minusPtr` start) s
+                  | otherwise = done (ptr `minusPtr` start) s
+                done !i !s = return (T i s)
+            inner start s1
+    bs <- getBuff
+    let T i s' = inlinePerformIO $ scanner bs
+        !h = unsafeTake i bs
+    continue <- atleastBytesLeft i
+    if continue
+      then go (h:acc) s'
+      else f s' (h:acc)
+{-# INLINE scan_ #-}
+
+-- | A stateful scanner.  The predicate consumes and transforms a
+-- state argument, and each transformed state is passed to successive
+-- invocations of the predicate on each byte of the input until one
+-- returns 'Nothing' or the input ends.
+--
+-- This parser does not fail.  It will return an empty string if the
+-- predicate returns 'Nothing' on the first byte of input.
+--
+-- /Note/: Because this parser does not fail, do not use it with
+-- combinators such as 'Control.Applicative.many', because such
+-- parsers loop until a failure occurs.  Careless use will thus result
+-- in an infinite loop.
+scan :: s -> (s -> Word8 -> Maybe s) -> YaraParser ByteString
+scan = scan_ $ \_ chunks -> return $! concatReverse chunks
+{-# INLINE scan #-}
+
 
 
 

@@ -2,7 +2,7 @@
 {-# LANGUAGE Rank2Types #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE UnboxedTuples #-}
-
+{-# LANGUAGE MultiWayIf #-}
 module Buffer
   ( toBuffer
   , bufferLength
@@ -18,6 +18,7 @@ module Buffer
   , substring
   ) where
 
+import Prelude hiding (length)
 import Data.ByteString.Internal hiding (inlinePerformIO)
 import Data.Word
 import Foreign.ForeignPtr
@@ -60,7 +61,7 @@ bufferAppend (Buf fp0 off0 len0 cap0 gen0) !fp1 !off1 !len1 =
           poke (castPtr ptr0) newgen
           memcpy (ptr0 `plusPtr` (off0+len0))
                  (ptr1 `plusPtr` off1)
-                 (fromIntegral len1)
+                 len1
           return (Buf fp0 off0 newlen cap0 newgen)
         else do
           let newcap = newlen * 2
@@ -69,9 +70,9 @@ bufferAppend (Buf fp0 off0 len0 cap0 gen0) !fp1 !off1 !len1 =
             let ptr    = ptr_ `plusPtr` genSize
                 newgen = 1
             poke (castPtr ptr_) newgen
-            memcpy ptr (ptr0 `plusPtr` off0) (fromIntegral len0)
+            memcpy ptr (ptr0 `plusPtr` off0) len0
             memcpy (ptr `plusPtr` len0) (ptr1 `plusPtr` off1)
-                   (fromIntegral len1)
+                   len1
             return (Buf fp genSize newlen newcap newgen)
 
 bufferUnsafeIndex :: Buffer -> Int -> Word8
@@ -122,3 +123,4 @@ unBuffer (Buf fp off len _ _) = PS fp off len
 bufferFrontAppend :: ByteString -> Buffer -> Buffer
 bufferFrontAppend bs buf = bufferPappend (toBuffer bs) (unBuffer buf)
 -}
+
