@@ -1,10 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE LambdaCase #-}
 
 -- |
--- Module      :  Yara.Parsing.Args
+-- Module      :  Yara.Parsers.Args
 -- Copyright   :  David Heras 2018-2019
 -- License     :  GPL-3
 --
@@ -19,97 +18,41 @@ module Args (parseArgs , showHelp) where
 import Prelude hiding ((++), takeWhile, reverse, all, unlines, unwords,
                        head, take, drop, concat, splitAt)
 import Data.ByteString hiding (takeWhile, elem, length)
+import qualified Data.ByteString as B (length)
 import Data.ByteString.Char8 (unlines, unwords)
+import qualified Data.Map.Strict as Map
 import Data.Sequence ((<|))
 import Control.Monad.State.Strict
 import GHC.Word
-
-import qualified Data.Map.Strict as Map
-
 import Buffer
 import Combinators
+import Parser
+import Rules
 import Types
 import Utilities
 
-{-- SHOULD BE MOVED TO RULES AND IMPORTED. FOR NOW> ---}
-import qualified Data.Set as Set
-
-
-isUnderscore, isLeadingByte, isIdByte :: Word8 -> Bool
-isUnderscore  = (==) 0x5F
-isLeadingByte = isAlpha <> isUnderscore
-isIdByte      = isAlphaNum <> isUnderscore
-
-checkIfIdentifier :: ByteString -> Bool
-checkIfIdentifier bs = case uncons bs of
-  Nothing      -> False
-  Just (x,"")  -> isAlpha x
-  Just (h,r)   -> (isLeadingByte h && all isIdByte r)
-                        && Set.notMember bs yaraKeywords
-
-yaraKeywords :: Set.Set ByteString
-yaraKeywords = Set.fromDistinctAscList [
-   "all"       , "and"       , "any"      , "ascii"      ,
-   "at"        , "condition" , "contains" , "entrypoint" ,
-   "false"     , "filesize"  , "for"      , "fullword"   ,
-   "global"    , "import"    , "in"       , "include"    ,
-   "int16"     , "int16be"   , "int32"    , "int32be"    ,
-   "int8"      , "int8be"    , "matches"  , "meta"       ,
-   "nocase"    , "not"       , "of"       , "or"         ,
-   "private"   , "rule"      , "strings"  , "them"       ,
-   "true"      , "uint16"    , "uint16be" , "uint32"     ,
-   "uint32be"  , "uint8"     , "uint8be"  , "wide"       ]
-
-
-{----------------------}
-
-isWindows :: Bool
-#if defined(mingw32_HOST_OS) || defined(__MINGW32__)
-isWindows = True
-#else
-isWindows = False
-#endif
-{-# INLINE isWindows #-}
-
--- Doesn't accept non-visible characters for Windows or Posix
+-- | Doesn't accept non-visible characters for Windows or Posix
 -- Windows excludes:  <  >  :  "  /  \  |  ?  *
-filepathByte :: Word8 -> Bool
-filepathByte w = if isWindows
+badFilepathByte :: Word8 -> Bool
+badFilepathByte w = not $ if onWindows
   then w - 35 <= 6 || w - 43 <= 3 || w - 48 <= 9 || w == 59
                           || w == 61 || w - 64 <= 27 || w == 93
                           || w - 95 <= 28 || w == 123 || w == 126
   else w - 33 <= 58 || w - 93 <= 33
-{-# INLINE filepathByte #-}
+{-# INLINE badFilepathByte #-}
 
--- Parse an unquoted-style filepath passed into the command line
--- No size limit is imposed.
--- Loaded with errors.
 filepath :: YaraParser ByteString
-filepath = go ""
-  where
-    go acc = do
-      bs <- takeWhile filepathByte
-      let acc' = acc ++ bs
-      end <- atEnd
-      if end
-        then return acc'
-        else peekWord8 >>= \case
-#if defined(mingw32_HOST_OS) || defined(__MINGW32__)
-          58 -> if null acc 
-            then do
-              c <- anyWord8
-              go $ acc' +> c
-            else badFPByte 58
-#endif
-          32 -> return acc'
-          92 -> do
-            r <- anyWord8
-            s <- anyWord8
-            if s == 20
-              then go $ acc' +> s -- No need to keep escape any longer
-              else go $ acc' +> r +> s
-          _  -> badFPByte =<< anyWord8
-    badFPByte = fault . (+>) "Unrecognized filepath character: "
+filepath = do
+  fp <- scan False p
+  w  <- peekWord8
+  when_ (isSpace w)
+        ("Encounter bad filepath character '" +> w ++ "'")
+        (return fp)
+  <?> "filepath"
+  where p b w | badFilepathByte w       = Nothing
+              | w == 32 && b == False   = Nothing
+              | w == 92 && b == False   = Just True
+              | otherwise               = Just False
 {-# INLINE filepath #-}
 
 value :: YaraParser Value
@@ -127,21 +70,17 @@ when_ b p q = if b then q else fault p
 {-# INLINE when_ #-}
 
 -- Return the next command line argument.
--- !!!!
--- NOT CORRECT
--- It needs to handle escaped spaces in filepath names as well
--- as quoted filepaths.
--- !!!!!
 getArg :: YaraParser ByteString
 getArg = do
-   spaces
-   bs <- takeTill isSpace
-   --case last bs of
-     --backslash then ->
-     -- otherwise
-   space1 -- Ensures followed by a space
-   return bs
-   -- may need another "go" function
+  spaces
+  arg <- scan False p
+  w <- peekWord8
+  when_ (w < 32) "Encountered bad command line character!" $ return arg
+  <?> "getArg"
+  where p b w | w < 32                  = Nothing
+              | w == 32 && b == False   = Nothing
+              | w == 92 && b == False   = Just True
+              | otherwise               = Just False
 {-# INLINE getArg #-}
 
 showHelp :: IO ()
@@ -168,8 +107,6 @@ showArgs = Map.foldlWithKey go "" args
 data ArgN = Arg0 ByteString             (YaraParser ())
           | Arg1 ByteString Label       (ByteString -> YaraParser ())
           | Arg2 ByteString Label Label (ByteString -> ByteString -> YaraParser ())
-
-
 
 -- Helps reability by avoiding (visible) tuple nesting
 (=?) :: a -> b -> (a,b)
@@ -199,7 +136,7 @@ args = Map.fromList [
   , 115 =? "print-strings"        =? Arg0 "print matching strings" (modify $ \e -> e { printStrings = True })
   , 76  =? "print-string-length"  =? Arg0 "print length of matched strings" (modify $ \e -> e { printStrLength = True })
   , 103 =? "print-tags"           =? Arg0 "print tags" (modify $ \e -> e { printTags = True })
-  , 114 =? "recursive"            =? Arg0 "recursively search directories" (modify $ \e -> e { recursivelySearch = True })
+  , 114 =? "recursive"            =? Arg0 "recursively search directories" (modify $ \e -> e { recursiveSearch = True })
   , 107 =? "stack-size"           =? Arg1 "set maximum stack size (default=16384)" "SLOTS" handleStackSize
   , 116 =? "tag"                  =? Arg1 "print only rules tagged as TAG" "TAG" handleTag
   , 112 =? "threads"              =? Arg1 "use the specified NUMBER of threads to scan a directory" "NUMBER" handleThreads
@@ -209,7 +146,7 @@ args = Map.fromList [
   where
     -- The following parses a bytestring of decimal characters. Its a bit of a hack
     -- without re-writing the decimal parser. Itll do for now.
-    parseInt u = parse (decimal <* spaces <* endOfBuffer) defaultEnv (u ++ " ")
+    parseInt u = parse (decimal <* spaces <* endOfInput) defaultEnv (u ++ " ")
     handleMaxStrings u = case parseInt u of
       Done _ i  -> modify $ \e -> e { maxStrPerRule = i }
       _         -> fault "option \"max-strings-per-rule\" ('M') requires an integer argument"
@@ -238,6 +175,7 @@ args = Map.fromList [
       _        -> fault "option \"define\" ('d') requires integer/bool/string argument"
 
     -- Error Messages
+    badIdenChars :: ByteString
     badIdenChars = "yara: indentifier contains exlcuded chars"
 
 unknownFlag :: ByteString -> YaraParser a
@@ -285,23 +223,63 @@ parseDoubleFlag bs =
     queryDoubleFlag :: ByteString -> Maybe ArgN
     queryDoubleFlag w = Map.lookup w $ Map.mapKeysMonotonic snd args
 
-
-
-
 -- | parseArgs_ actually handles the command line arguments
 parseArgs_ :: YaraParser Env
 parseArgs_ = do
   w <- getArg
-  if | isPrefixOf "--" w  -> parseDoubleFlag w *> parseArgs_
-     | isPrefixOf "-"  w  -> parseSingleFlag *> parseArgs_
-     | otherwise          -> --do
-         --b <- atEnd
-         undefined
-
+  if | isPrefixOf "--" w  && B.length w > 2  -> parseDoubleFlag w *> parseArgs_
+     | isPrefixOf "-"  w  && B.length w > 1  -> parseSingleFlag *> parseArgs_
+     | otherwise                           -> undefined
 
 -- | parseArgs initiates the buffer
 parseArgs :: [ByteString] -> Result Env
 parseArgs bs = parse parseArgs_ defaultEnv $ unwords bs
+
+
+
+
+
+
+
+
+
+
+
+
+{-
+
+-- Parse an unquoted-style filepath passed into the command line
+-- No size limit is imposed.
+-- Loaded with errors.
+filepath :: YaraParser ByteString
+filepath = go ""
+  where
+    go acc = do
+      bs <- takeWhile filepathByte
+      let acc' = acc ++ bs
+      end <- atEnd
+      if end
+        then return acc'
+        else peekWord8 >>= \case
+--#if defined(mingw32_HOST_OS) || defined(__MINGW32__)
+          58 -> if null acc
+            then do
+              c <- anyWord8
+              go $ acc' +> c
+            else badFPByte 58
+--#endif
+          32 -> return acc'
+          92 -> do
+            r <- anyWord8
+            s <- anyWord8
+            if s == 20
+              then go $ acc' +> s -- No need to keep escape any longer
+              else go $ acc' +> r +> s
+          _  -> badFPByte =<< anyWord8
+    badFPByte w = fault $ "Unrecognized filepath character '" +> w "'"
+{-# INLINE filepath #-}
+
+-}
 
 
 

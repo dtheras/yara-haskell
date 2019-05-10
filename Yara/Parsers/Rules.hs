@@ -29,9 +29,9 @@ import qualified Data.Map       as Map
 import qualified Data.Sequence  as Seq
 import qualified Data.Set       as Set
 
-import Args
 import Buffer
 import Combinators
+import Parser
 import Types
 import Utilities
 
@@ -70,6 +70,12 @@ data YaraStr
 
 instance Show YaraStr where
   show _ = "YaraStr :: Str"
+
+
+bool :: YaraParser Bool
+bool = (string "false" $> False) <|> (string "true" $> True) <?> "bool"
+{-# INLINE bool #-}
+
 
 -- KEYWORD SETS
 

@@ -1,7 +1,9 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ApplicativeDo #-}
+{-# LANGUAGE CPP #-}
 module Utilities (
-    (++)
+    onWindows
+  , (++)
   , (<+)
   , (+>)
   , putErr
@@ -11,11 +13,10 @@ module Utilities (
   ) where
 
 import Prelude hiding ((++))
---import Control.Applicative hiding (liftA2)
 import Data.ByteString
 import Data.Functor
 import Data.Word
-import qualified Data.List as List
+import qualified Data.List
 import System.IO (stderr)
 
 instance Semigroup Bool where
@@ -25,18 +26,30 @@ infixl 5 ++
 infixr 5 <+
 infixl 5 +>
 
+onWindows :: Bool
+#if defined(mingw32_HOST_OS) || defined(__MINGW32__)
+onWindows = True
+#else
+onWindows = False
+#endif
+{-# INLINE onWindows #-}
+
+-- | Concatenate operator for bytestrings (Prelude to be imported hiding (++))
 (++) :: ByteString -> ByteString -> ByteString
 (++) = append
 {-# INLINE (++) #-}
 
+-- | Operator for `cons`
 (<+) :: Word8 -> ByteString -> ByteString
 (<+) = cons
 {-# INLINE (<+) #-}
 
+-- | Operator for `snoc`
 (+>) :: ByteString -> Word8 -> ByteString
 (+>) = snoc
 {-# INLINE (+>) #-}
 
+-- | Version of liftA2, strict in second argument
 liftA2 :: (Applicative f) => (a -> b -> c) -> f a -> f b -> f c
 liftA2 f a b = do
   x <- a
@@ -52,5 +65,5 @@ putErr = hPutStrLn stderr
 -- \"backwards\".
 concatReverse :: Monoid m => [m] -> m
 concatReverse [x] = x
-concatReverse xs  = mconcat (List.reverse xs)
+concatReverse xs  = mconcat (Data.List.reverse xs)
 {-# INLINE concatReverse #-}

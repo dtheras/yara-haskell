@@ -1,10 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE Rank2Types #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE CPP #-}
-
 #ifdef HLINT
 {-# ANN module "HLint: ignore Eta reduce" #-}
 #endif
@@ -12,15 +11,16 @@
 module Combinators
   ( (<?>)
   , (<^>)
+  , bool1
   , pair
   , parse
   , advance
   , atEnd
+  , endOfBuffer
   , endOfInput
   , getPos
   , getPosByteString
   , getPosByteStringP1
-
   -- Parser Predicates
   , isAlpha
   , isDigit
@@ -33,8 +33,10 @@ module Combinators
   , peekWord8
   , satisfy
   , anyWord8
+  , skipWhile
   , takeTill
   , takeWhile
+  , space
   , space1
   , spaces
   , word8
@@ -52,6 +54,8 @@ module Combinators
   , colon
   , equal
   , at
+  , lt
+  , gt
   , quote
   , option
   , many
@@ -69,11 +73,13 @@ module Combinators
   , stringIgnoreCase
   , bool
   , scan
+  , atleastBytesLeft
   ) where
 
 import Prelude hiding (map, null, drop, takeWhile, length, (++),
                        concat, reverse)
 import Control.Monad.Reader
+import Control.Exception
 import Control.Applicative hiding (liftA2)
 import Data.Bits
 import Data.ByteString hiding (count, elem, empty, foldr, append, takeWhile)
@@ -91,6 +97,7 @@ import qualified Data.Sequence as Seq
 
 import Types
 import Buffer
+import Parser
 import Utilities
 
 infix 0 <?>
@@ -99,29 +106,23 @@ infixr 2 <^>
 instance (a ~ ByteString) => IsString (YaraParser a) where
     fromString = string . C8.pack
 
-
---- RUNNING A PARSER
-
-parse :: YaraParser a -> Env -> ByteString -> Result a
-parse m e s = runParser m e (toBuffer s) (Pos 0) Incomplete failK successK
-  where successK t (Pos pos) _more = Done (bufferUnsafeDrop pos t)
-        failK t (Pos pos) _more = Fail (bufferUnsafeDrop pos t)
-{-# INLINE parse #-}
-
-parse_ :: YaraParser a -> ByteString -> Result a
-parse_ par bs = parse par defaultEnv bs
-{-# INLINE parse_ #-}
-
-
-advance :: Int -> YaraParser ()
-advance n = YaraParser $ \_ t pos more _lose suc ->
-  suc t (pos + Pos n) more ()
-{-# INLINE advance #-}
-
 -- | Return current position.
 getPos :: YaraParser Int
-getPos = YaraParser $ \_ b !p m _ s -> s b p m $ fromPos p
+getPos = YaraParser $ \b !e _ s -> s b e (position e)
 {-# INLINE getPos #-}
+
+-- | Return remaining buffer as a bytestring
+getBuff :: YaraParser ByteString
+getBuff = YaraParser $ \b e _ s -> s b e (bufferUnsafeDrop (position e) b)
+{-# INLINE getBuff #-}
+
+-- | Return 'True' if buffer is empty
+endOfBuffer :: YaraParser Bool
+endOfBuffer =
+  liftA2 (==) getPos (YaraParser $ \b@(Buf _ _ l _ _) e _ s ->
+                       let p = position e
+                       in s b e $ assert (p >= 0 && p <= l) (l-p)  )
+{-# INLINE endOfBuffer #-}
 
 -- | Convert int to a bytestring.
 -- Not exported.
@@ -129,6 +130,8 @@ getPos = YaraParser $ \_ b !p m _ s -> s b p m $ fromPos p
 -- word novel, at over-estimate of 7 characters a word, leaves us
 -- converting a number less than 850,000 into a bytestring, max. That is utterly
 -- dwarfed by the actual loading into the buffer "War & Peace."
+--
+-- Casual estimates in ghci suggest this is the fastest method.
 int2bs :: Int -> ByteString
 int2bs =  L.toStrict . toLazyByteString . intDec
 {-# INLINE int2bs #-}
@@ -151,24 +154,23 @@ getPosByteStringP1 = int2bs . (+1) <$> getPos
 -- | This parser always succeeds.  It returns 'True' if the end
 -- of all input has been reached, and 'False' if any input is available
 atEnd :: YaraParser Bool
-atEnd = YaraParser $ \_ t pos more _lose suc ->
-  if | pos < (Pos $ bufferLength t) -> suc t pos more False
-     | more == Complete    -> suc t pos more True
-     | otherwise -> let lose' t' pos' more' = suc t' pos' more' True
-                        suc' t' pos' more'  = suc t' pos' more' False
-                    in prompt t pos more lose' suc'
+atEnd = YaraParser $ \b e l s ->
+  if | position e < bufferLength b  -> s b e False
+     | moreInput e == Complete      -> s b e True
+     | otherwise                    -> prompt (\b_ e_ -> s b_ e_ True)
+                                              (\b_ e_ -> s b_ e_ False)
+                                              b e
 {-# INLINE atEnd #-}
 
 -- | Match only if all input has been consumed.
 endOfInput :: YaraParser ()
-endOfInput = YaraParser $ \e t pos more lose suc ->
-  if | pos < (Pos $ bufferLength t) -> lose t pos more [] "endOfInput"
-     | more == Complete -> suc t pos more ()
-     | otherwise ->  let lose' t' pos' more' _ctx _msg = suc t' pos' more' ()
-                         suc' t' pos' more' _a = lose t' pos' more' [] "endOfInput"
-                     in  runParser demandInput e t pos more lose' suc'
+endOfInput = YaraParser $ \b e l s ->
+  if | position e < bufferLength b  -> l b e [] "endOfInput"
+     | moreInput e == Complete      -> s b e ()
+     | otherwise        -> runParser demandInput b e
+                                     (\b_ e_ _ _ -> l b_ e_ [] "endOfInput")
+                                     (\b_ e_ _   -> s b_ e_ ())
 {-# INLINE endOfInput #-}
-
 
 
 
@@ -200,9 +202,10 @@ untuple (b,c) = do
 
 -- | Name the parser, in case failure occurs.
 (<?>) :: YaraParser a -> ByteString -> YaraParser a
-par <?> msg0 = YaraParser $ \e t p m l s ->
-   let l' t' p' m' strs = l t' p' m' (msg0:strs)
-   in runParser par e t p m l' s
+par <?> msg = YaraParser $ \b e l s ->
+   runParser par b e (\b_ e_ s_ m_ -> l b_ e_ (msg:s_) m_) s
+
+
 {-# INLINE (<?>) #-}
 
 option :: a -> YaraParser a -> YaraParser a
@@ -353,11 +356,11 @@ isHorizontalSpace w = w == 32 || w == 9
 
 -- | Peek at next word8. Doesn't fail unless at end of input.
 peekWord8 :: YaraParser Word8
-peekWord8 = YaraParser $ \e t pos more lose suc ->
-    if bufferLengthAtLeast pos 1 t
-    then suc t pos more (bufferUnsafeIndex t (fromPos pos))
-    else let suc' t' pos' more' bs' = suc t' pos' more' $! unsafeHead bs'
-         in ensureSuspended e 1 t pos more lose suc'
+peekWord8 = YaraParser $ \b e l s ->
+  let pos = position e in
+  if bufferLengthAtLeast pos 1 b
+     then s b e (bufferUnsafeIndex b pos)
+     else ensureSuspended 1 b e l (\b e bs -> s b e $! unsafeHead bs)
 {-# INLINE peekWord8 #-}
 
 satisfy :: (Word8 -> Bool) -> YaraParser Word8
@@ -482,6 +485,9 @@ takeTill :: (Word8 -> Bool) -> YaraParser ByteString
 takeTill p = takeWhile (not . p)
 {-# INLINE takeTill #-}
 
+
+
+
 takeWhile :: (Word8 -> Bool) -> YaraParser ByteString
 takeWhile p = do
     s <- BS.takeWhile p <$> getBuff
@@ -493,7 +499,7 @@ takeWhile p = do
 
 takeWhile1 :: (Word8 -> Bool) -> YaraParser ByteString
 takeWhile1 p = do
-  (`when` demandInput) =<< endOfBuffer
+  (`when` void demandInput) =<< endOfBuffer
   s <- BS.takeWhile p <$> getBuff
   let len = length s
   if len == 0
@@ -508,13 +514,13 @@ takeWhile1 p = do
 
 takeWhileAcc :: (Word8 -> Bool) -> [ByteString] -> YaraParser ByteString
 takeWhileAcc p = go
- where
-  go acc = do
-    s <- BS.takeWhile p <$> getBuff
-    continue <- atleastBytesLeft (length s)
-    if continue
-      then go (s:acc)
-      else return $ concatReverse (s:acc)
+  where
+    go acc = do
+      s <- BS.takeWhile p <$> getBuff
+      continue <- atleastBytesLeft (length s)
+      if continue
+        then go (s:acc)
+        else return $ concatReverse (s:acc)
 {-# INLINE takeWhileAcc #-}
 
 between :: YaraParser o
@@ -548,10 +554,23 @@ grouping p = between openParen closeParen $ interleaved vertBar p
 litString :: YaraParser ByteString
 litString = quote *> (go "") <* quote <?> "litString"
   where
+    -- s - stores previous char
+    go s w
+      -- If quote, not preceeded by backslash, the string is closed.
+      | s /= 92 && w == 34   = Nothing
+      -- Quote, preceeded by backslash is cool. 
+      | s == 92 && w == 34   = Just w
+
+      | s == 92 && (isSpace w || isNewline w)  = Just ~~tricky
+
+
     go acc = do
       -- Take till a quote, newline, or backslash
-      bs <- takeTill $ \q -> elem q [92, 34, 10]
+      bs <- takeTill $ \q -> q `elem` [92, 34, 10]
       let acc_ = acc ++ bs
+          gotoNextChar = do
+            takeWhile isHorizontalSpace
+            go =<< (acc_ +>) <$> satisfy notSpace
       peekWord8 >>= \case
         -- If unescaped quote, we've reached the end of the string.
         -- The accumulation is stored in reverse until returned
@@ -563,7 +582,7 @@ litString = quote *> (go "") <* quote <?> "litString"
           r <- anyWord8
           s <- anyWord8
              -- If next is a slash of quote, then we append.
-             -- NOTE: the appending in reverse. 
+             -- NOTE: the appending in reverse.
           if | s == 34 || s == 92 -> go $ acc_ +> r +> s
              -- When there is a space after a slash, may have
              -- a string break among multiple lines, but a few empty
@@ -571,15 +590,10 @@ litString = quote *> (go "") <* quote <?> "litString"
              | isHorizontalSpace s -> do
                  takeWhile isHorizontalSpace
                  endOfLine
-                 takeWhile isHorizontalSpace
-                 n <- satisfy notSpace
-                 go $ acc_ +> n
+                 gotoNextChar
              -- Handles the case that there is a newline immediately after
              -- the escape slash.
-             | 10 == s -> do
-                 takeWhile isHorizontalSpace
-                 n <- satisfy notSpace
-                 go $ acc_ +> n
+             | 10 == s -> gotoNextChar
              -- Anyother is not supported.
              | otherwise -> fault $ "Unrecognized escape char: " +> s
         -- Shuts up incomplete-patterns
@@ -588,124 +602,104 @@ litString = quote *> (go "") <* quote <?> "litString"
 
 -- MATCH STRINGS
 
+
+-- | Match a specific string.
+string :: ByteString -> YaraParser ByteString
+string bs = stringWithMorph id bs
+{-# INLINE string #-}
+
+-- | Satisfy a literal string, ignoring case.
+-- ASCII-specific but fast, oh yes.
+stringIgnoreCase :: ByteString -> YaraParser ByteString
+stringIgnoreCase b = stringWithMorph (map toLower) b
+  where toLower w | w >= 65 && w <= 90 = w + 32
+                  | otherwise          = w
+{-# INLINE stringIgnoreCase #-}
+
+-- | To annotate
 stringWithMorph :: (ByteString -> ByteString)
-                -> ByteString
-                -> YaraParser ByteString
+                -> ByteString -> YaraParser ByteString
 stringWithMorph f s = string_ (stringSuspended f) f s
 {-# INLINE stringWithMorph #-}
 
-string_ :: (forall r. Env -> ByteString -> ByteString -> Buffer -> Pos -> More
+-- | To annotate
+string_ :: (forall r. ByteString -> ByteString -> Buffer -> Env
             -> Failure r -> Success ByteString r -> Result r)
         -> (ByteString -> ByteString)
         -> ByteString -> YaraParser ByteString
-string_ suspended f s0 = YaraParser $ \e t pos more lose suc ->
-  let n = length s
-      s = f s0
-  in if bufferLengthAtLeast pos n t
-     then let t' = substring pos (Pos n) t
-          in if s == f t'
-             then suc t (pos + Pos n) more t'
-             else lose t pos more [] "string"
-     else let t' = bufferUnsafeDrop (fromPos pos) t
-          in if f t' `isPrefixOf` s
-             then suspended e s (drop (length t') s) t pos more lose suc
-             else lose t pos more [] "string"
+string_ suspended f s0 = YaraParser $ \b e l s ->
+  let bs = f s0
+      n = length bs
+      pos = position e
+      b_ = substring pos n b
+      t_ = bufferUnsafeDrop pos b
+  in if
+    | bufferLengthAtLeast pos n b && (bs == f b_)  -> s b (posMap (+n) e) b_
+    | f t_ `isPrefixOf` bs   -> suspended bs (drop (length t_) bs) b e l s
+    | otherwise              -> l b e [] "string"
 {-# INLINE string_ #-}
 
 stringSuspended :: (ByteString -> ByteString)
-                -> Env -> ByteString -> ByteString -> Buffer -> Pos -> More
-                -> Failure r
-                -> Success ByteString r
-                -> Result r
-stringSuspended f e s0 s t pos more lose suc =
-    runParser (demandInput_ >>= go) e t pos more lose suc
-  where go s'0   = YaraParser $ \env t' pos' more' lose' suc' ->
-          let m  = length s
-              s' = f s'0
-              n  = length s'
-          in if n >= m
-             then if unsafeTake m s' == s
-                  then let o = Pos (length s0)
-                       in suc' t' (pos' + o) more'
-                          (substring pos' o t')
-                  else lose' t' pos' more' [] "string"
-             else if s' == unsafeTake n s
-                  then stringSuspended f env s0 (unsafeDrop n s)
-                       t' pos' more' lose' suc'
-                  else lose' t' pos' more' [] "string"
+                -> ByteString -> ByteString -> Buffer -> Env
+                -> Failure r -> Success ByteString r -> Result r
+stringSuspended f s0 s1 = runParser (demandInput >>= go)
+  where
+    m  = length s1
+    go str = YaraParser $ \b e l s -> let n = length (f str) in if
+        | n >= m && unsafeTake m (f str) == s1 ->
+                           let o = length s0
+                           in s b (posMap (+o) e) (substring (position e) o b)
+        | str == unsafeTake n s1 -> stringSuspended f s0 (unsafeDrop n s1) b e l s
+        | otherwise              -> l b e [] "string"
 {-# INLINE stringSuspended #-}
 
--- | Immediately demand more input via a 'Partial' continuation
--- result.
-demandInput :: YaraParser ()
-demandInput = YaraParser $ \_ t pos more lose suc ->
-  case more of
-    Complete -> lose t pos more [] "not enough input"
-    _ -> let lose' _ pos' more' = lose t pos' more' [] "not enough input"
-             suc' t' pos' more' = suc t' pos' more' ()
-         in prompt t pos more lose' suc'
-{-# INLINE demandInput #-}
-
--- | Immediately demand more input via a 'Partial' continuation
--- result.  Return the new input.
-demandInput_ :: YaraParser ByteString
-demandInput_ = YaraParser $ \_ t pos more lose suc ->
-  case more of
-    Complete -> lose t pos more [] "not enough input"
-    _ -> Partial $ \s ->
-         if null s
-         then lose t pos Complete [] "not enough input"
-         else suc (bufferPappend t s) pos more s
-{-# INLINE demandInput_ #-}
-
--- | Ask for input.  If we receive any, pass the augmented input to a
--- success continuation, otherwise to a failure continuation.
-prompt :: Buffer -> Pos -> More
-       -> (Buffer -> Pos -> More -> Result r)
-       -> (Buffer -> Pos -> More -> Result r)
-       -> Result r
-prompt t pos _more lose suc = Partial $ \s ->
-  if null s
-  then lose t pos Complete
-  else suc (bufferPappend t s) pos Incomplete
-{-# INLINE prompt #-}
-
+-- | Checks if there are atleast `n` bytes of buffer string left.
+-- Parse always succeeds
 atleastBytesLeft :: Int -> YaraParser Bool
-atleastBytesLeft i = YaraParser $ \_ t pos_ more _lose suc ->
-  let pos = pos_ + Pos i
-  in if fromPos pos < bufferLength t || more == Complete
-     then suc t pos more False
-     else let lose' t' pos' more' = suc t' pos' more' False
-              suc'  t' pos' more' = suc t' pos' more' True
-          in prompt t pos more lose' suc'
+atleastBytesLeft i = YaraParser $ \b e _ s ->
+  let pos = position e + i in
+  if pos < bufferLength b || moreInput e == Complete
+    then s b (e { position = pos}) False
+    else prompt (\b_ e_ -> s b_ e_ False)
+                (\b_ e_ -> s b_ e_ True)
+                b
+                (e {position = pos})
 {-# INLINE atleastBytesLeft #-}
 
-ensureSuspended :: Env -> Int -> Buffer -> Pos -> More
+ensureSuspended :: Int -> Buffer -> Env
                 -> Failure r
                 -> Success ByteString r
                 -> Result r
-ensureSuspended env n t pos more lose suc =
-    runParser (demandInput >> go) env t pos more lose suc
-  where go = YaraParser $ \e t' pos' more' lose' suc' ->
-          if bufferLengthAtLeast pos' n t'
-          then suc' t' pos' more' (substring pos (Pos n) t')
-          else runParser (demandInput >> go) e t' pos' more' lose' suc'
+ensureSuspended n = runParser (demandInput >> go)
+  where go = YaraParser $ \b e l s ->
+          let pos = position e in
+          if bufferLengthAtLeast pos n b
+            then s b e (substring pos n b)
+            else runParser (demandInput >> go) b e l s
 {-# INLINE ensureSuspended #-}
 
 -- | If at least @n@ elements of input are available, return the
 -- current input, otherwise fail.
 ensure :: Int -> YaraParser ByteString
-ensure n = YaraParser $ \e t pos more lose suc ->
-    if bufferLengthAtLeast pos n t
-    then suc t pos more (substring pos (Pos n) t)
-    -- The uncommon case is kept out-of-line to reduce code size:
-    else ensureSuspended e n t pos more lose suc
+ensure n = (YaraParser $ \b e l s ->
+    let pos = position e in
+    if bufferLengthAtLeast pos n b
+      then s b e (substring pos n b)
+      -- The uncommon case is kept out-of-line to reduce code size:
+      else ensureSuspended n b e l s
+    ) <?> "ensure"
 {-# INLINE ensure #-}
 
--- | Match a specific string.
-string :: ByteString -> YaraParser ByteString
-string = stringWithMorph id
-{-# INLINE string #-}
+-- | Immediately demand more input via a 'Partial' continuation
+-- result.
+demandInput :: YaraParser ByteString
+demandInput = YaraParser $ \b e l s ->
+  case moreInput e of
+    Complete -> l b e [] "not enough input"
+    _        -> Partial $ \bs -> if null bs
+      then l b (e { moreInput = Complete }) [] "not enough input"
+      else s (bufferPappend b bs) (e { moreInput = Incomplete }) bs
+{-# INLINE demandInput #-}
 
 -- | Match on of a specific list of strings
 strings :: Foldable f => f ByteString -> YaraParser ByteString
@@ -714,50 +708,7 @@ strings = foldMap string
 {-# SPECIALIZE strings :: Seq.Seq ByteString -> YaraParser ByteString #-}
 {-# SPECIALIZE strings :: [ByteString] -> YaraParser ByteString #-}
 
--- | Satisfy a literal string, ignoring case.
--- ASCII-specific but fast, oh yes.
-stringIgnoreCase :: ByteString -> YaraParser ByteString
-stringIgnoreCase = stringWithMorph (map toLower)
-  where toLower w | w >= 65 && w <= 90 = w + 32
-                  | otherwise          = w
-{-# INLINE stringIgnoreCase #-}
-
-bool :: YaraParser Bool
-bool = peekWord8 >>= \case
-  102 -> string "false" $> False
-  116 -> string "true" $> True
-  _   -> fail "bool"
-  <?> "bool"
-{-# INLINE bool #-}
-
 data T s = T {-# UNPACK #-} !Int s
-
-scan_ :: (s -> [ByteString] -> YaraParser a) -> s -> (s -> Word8 -> Maybe s)
-         -> YaraParser a
-scan_ f s0 p = go [] s0
- where
-  go acc s1 = do
-    let scanner (PS fp off len) =
-          withForeignPtr fp $ \ptr0 -> do
-            let start = ptr0 `plusPtr` off
-                end   = start `plusPtr` len
-                inner ptr !s
-                  | ptr < end = do
-                    w <- peek ptr
-                    case p s w of
-                      Just s' -> inner (ptr `plusPtr` 1) s'
-                      _       -> done (ptr `minusPtr` start) s
-                  | otherwise = done (ptr `minusPtr` start) s
-                done !i !s = return (T i s)
-            inner start s1
-    bs <- getBuff
-    let T i s' = inlinePerformIO $ scanner bs
-        !h = unsafeTake i bs
-    continue <- atleastBytesLeft i
-    if continue
-      then go (h:acc) s'
-      else f s' (h:acc)
-{-# INLINE scan_ #-}
 
 -- | A stateful scanner.  The predicate consumes and transforms a
 -- state argument, and each transformed state is passed to successive
@@ -772,13 +723,95 @@ scan_ f s0 p = go [] s0
 -- parsers loop until a failure occurs.  Careless use will thus result
 -- in an infinite loop.
 scan :: s -> (s -> Word8 -> Maybe s) -> YaraParser ByteString
-scan = scan_ $ \_ chunks -> return $! concatReverse chunks
+scan s0 p = go [] s0 <?> "scan"
+  where
+    go acc s1 = do
+      let scanner (PS fp off len) =
+            withForeignPtr fp $ \ptr0 -> do
+              let done !i !s = return (T i s)
+                  start = ptr0 `plusPtr` off
+                  end   = start `plusPtr` len
+                  inner ptr !s
+                    | ptr < end = do
+                      w <- peek ptr
+                      case p s w of
+                        Just s' -> inner (ptr `plusPtr` 1) s'
+                        _       -> done (ptr `minusPtr` start) s
+                    | otherwise = done (ptr `minusPtr` start) s
+              inner start s1
+      bs <- getBuff
+      let T i p = inlinePerformIO $ scanner bs
+          !h = unsafeTake i bs
+      continue <- atleastBytesLeft i
+      if continue
+        then go (h:acc) p
+        else return $! concatReverse (h:acc)
 {-# INLINE scan #-}
 
 
 
 
 
+
+{-
+
+-- | litString parses a literal string
+-- Strings can contain the following escape bytes \" \\ \t \n \r and handle
+-- string line breaks.
+-- Returns the content of the string without the quotation bytes.
+litString :: YaraParser ByteString
+litString = quote *> (go "") <* quote <?> "litString"
+  where
+    -- s - stores previous char
+    go s w
+      -- If quote, not preceeded by backslash, the string is closed.
+      | s /= 92 && w == 34   = Nothing
+      -- Quote, preceeded by backslash is cool. 
+      | s == 92 && w == 34   = Just w
+
+      | s == 92 && (isSpace w || isNewline w)  = Just ~~tricky
+
+
+    go acc = do
+      -- Take till a quote, newline, or backslash
+      bs <- takeTill $ \q -> q `elem` [92, 34, 10]
+      let acc_ = acc ++ bs
+          gotoNextChar = do
+            takeWhile isHorizontalSpace
+            go =<< (acc_ +>) <$> satisfy notSpace
+      peekWord8 >>= \case
+        -- If unescaped quote, we've reached the end of the string.
+        -- The accumulation is stored in reverse until returned
+        34 -> return acc_
+        -- If new line, fault since string was not closed.
+        10 -> fault "string was not closed"
+        -- If backslash, check next byte.
+        92 -> do
+          r <- anyWord8
+          s <- anyWord8
+             -- If next is a slash of quote, then we append.
+             -- NOTE: the appending in reverse.
+          if | s == 34 || s == 92 -> go $ acc_ +> r +> s
+             -- When there is a space after a slash, may have
+             -- a string break among multiple lines, but a few empty
+             -- spaces follow
+             | isHorizontalSpace s -> do
+                 takeWhile isHorizontalSpace
+                 endOfLine
+                 gotoNextChar
+             -- Handles the case that there is a newline immediately after
+             -- the escape slash.
+             | 10 == s -> gotoNextChar
+             -- Anyother is not supported.
+             | otherwise -> fault $ "Unrecognized escape char: " +> s
+        -- Shuts up incomplete-patterns
+        _  -> fault "How did you get here?"
+    notSpace = not . isSpace
+
+
+
+
+-}
 
 
 -- ? between (str "\"") (str "\"")  many $ choice [alphaNum, escapeseq,
