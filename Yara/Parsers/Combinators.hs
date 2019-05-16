@@ -4,76 +4,47 @@
 {-# LANGUAGE Rank2Types #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE CPP #-}
-#ifdef HLINT
+{-# LANGUAGE TupleSections #-}
+#ifdef hlint
 {-# ANN module "HLint: ignore Eta reduce" #-}
 #endif
+-- |
+-- Module      :  Yara.Parsers.Combinators
+-- Copyright   :  David Heras 2018-2019
+-- License     :  GPL-3
+--
+-- Maintainer  :  dheras@protonmail.com
+-- Stability   :  experimental
+-- Portability :  unknown
+--
+-- A library of useful, general parser combinators.
+--
+module Combinators (
 
-module Combinators
-  ( (<?>)
-  , (<^>)
-  , bool1
-  , pair
-  , parse
-  , advance
-  , atEnd
-  , endOfBuffer
-  , endOfInput
-  , getPos
-  , getPosByteString
-  , getPosByteStringP1
+  -- Parser combinators
+  pair, parse, atEnd, endOfBuffer, endOfInput,
+
   -- Parser Predicates
-  , isAlpha
-  , isDigit
-  , isAlphaNum
-  , isSpace
-  , isEndOfLine
-  , isHorizontalSpace
+  isAlpha, isDigit, isAlphaNum, isSpace, isEndOfLine, isHorizontalSpace,
 
   -- Fundamental Parsers
-  , peekWord8
-  , satisfy
-  , anyWord8
-  , skipWhile
-  , takeTill
-  , takeWhile
-  , space
-  , space1
-  , spaces
-  , word8
+  peekByte, satisfy, anyByte, skipWhile, takeTill, takeWhile, takeWhile1,
+  space, space1, spaces, byte,
 
   -- Specific character parsers
-  , openCurl
-  , closeCurl
-  , openParen
-  , closeParen
-  , bSlash
-  , fSlash
-  , tab
-  , vertBar
-  , dash
-  , colon
-  , equal
-  , at
-  , lt
-  , gt
-  , quote
-  , option
-  , many
-  , many1
-  , sepBy
-  , sepBy1
-  , manyTill
-  , skipMany
-  , skipMany1
-  , count
-  , decimal
-  -- ByteString parsers
-  , string
-  , strings
-  , stringIgnoreCase
-  , bool
-  , scan
-  , atleastBytesLeft
+  openCurl, closeCurl, openParen, closeParen, bSlash, fSlash, tab, vertBar,
+  dash, colon, equal, at, lt, gt, quote,
+
+  option, perhaps, many, many1, manyTill, skipTo, skipMany, skipMany1, count,
+
+   -- String parsers
+  string, strings, stringIgnoreCase, scan, atleastBytesLeft,
+  {-quotedString, quotedStringWith,-}
+
+  -- `sepBy` Parsers
+  sepBy,  sepBySet,  sepBySeq,  sepByMap,
+  sepBy1, sepBy1Set, sepBy1Seq, sepBy1Map
+
   ) where
 
 import Prelude hiding (map, null, drop, takeWhile, length, (++),
@@ -81,35 +52,27 @@ import Prelude hiding (map, null, drop, takeWhile, length, (++),
 import Control.Monad.Reader
 import Control.Exception
 import Control.Applicative hiding (liftA2)
-import Data.Bits
 import Data.ByteString hiding (count, elem, empty, foldr, append, takeWhile)
-import qualified Data.ByteString as BS (takeWhile)
-import Data.ByteString.Builder (toLazyByteString, intDec)
+import qualified Data.ByteString       as BS (takeWhile)
 import qualified Data.ByteString.Char8 as C8
-import Data.ByteString.Internal (ByteString(..))
-import qualified Data.ByteString.Lazy as L (toStrict)
+import Data.ByteString.Internal --(ByteString(..))
 import Data.ByteString.Unsafe
---import Data.Functor
-import Data.String (IsString(..))
-import GHC.Word
+import Data.Default
+import Data.String --(IsString(..))
 import Foreign hiding (void)
-import qualified Data.Sequence as Seq
-
+import Data.Sequence ((<|))
+    -----
+import qualified Data.Map.Strict as Map
+import qualified Data.Sequence   as Seq
+import qualified Data.Set        as Set
+    -----
 import Types
 import Buffer
 import Parser
 import Utilities
 
-infix 0 <?>
-infixr 2 <^>
-
 instance (a ~ ByteString) => IsString (YaraParser a) where
     fromString = string . C8.pack
-
--- | Return current position.
-getPos :: YaraParser Int
-getPos = YaraParser $ \b !e _ s -> s b e (position e)
-{-# INLINE getPos #-}
 
 -- | Return remaining buffer as a bytestring
 getBuff :: YaraParser ByteString
@@ -118,47 +81,19 @@ getBuff = YaraParser $ \b e _ s -> s b e (bufferUnsafeDrop (position e) b)
 
 -- | Return 'True' if buffer is empty
 endOfBuffer :: YaraParser Bool
-endOfBuffer =
-  liftA2 (==) getPos (YaraParser $ \b@(Buf _ _ l _ _) e _ s ->
-                       let p = position e
-                       in s b e $ assert (p >= 0 && p <= l) (l-p)  )
+endOfBuffer = liftA2 (==) getPos (YaraParser $ \b@(Buf _ _ l _ _) e _ s ->
+                                    let p = position e
+                                    in s b e $ assert (p >= 0 && p <= l) (l-p))
 {-# INLINE endOfBuffer #-}
-
--- | Convert int to a bytestring.
--- Not exported.
--- Fairly ugly and uses the really slow 'toStrict', but even if parsing a 100,00
--- word novel, at over-estimate of 7 characters a word, leaves us
--- converting a number less than 850,000 into a bytestring, max. That is utterly
--- dwarfed by the actual loading into the buffer "War & Peace."
---
--- Casual estimates in ghci suggest this is the fastest method.
-int2bs :: Int -> ByteString
-int2bs =  L.toStrict . toLazyByteString . intDec
-{-# INLINE int2bs #-}
-
--- | Return current position as a ByteString.
---
--- Used for returning location in printable format.
-getPosByteString :: YaraParser ByteString
-getPosByteString = int2bs <$> getPos
-{-# INLINE getPosByteString #-}
-
--- | Return current position plus 1 as a ByteString.
--- Specifically written to be used in combination with matching cases on
--- 'peekWord8'. So when reporting a parsing issue on that peeked word, reporting
--- refelects an accurate position
-getPosByteStringP1 :: YaraParser ByteString
-getPosByteStringP1 = int2bs . (+1) <$> getPos
-{-# INLINE getPosByteStringP1 #-}
 
 -- | This parser always succeeds.  It returns 'True' if the end
 -- of all input has been reached, and 'False' if any input is available
 atEnd :: YaraParser Bool
-atEnd = YaraParser $ \b e l s ->
-  if | position e < bufferLength b  -> s b e False
-     | moreInput e == Complete      -> s b e True
-     | otherwise                    -> prompt (\b_ e_ -> s b_ e_ True)
-                                              (\b_ e_ -> s b_ e_ False)
+atEnd = YaraParser $ \b e _ s ->
+  if | position e < bufferLength b  -> s b e True
+     | moreInput e == Complete      -> s b e False
+     | otherwise                    -> prompt (\b_ e_ -> s b_ e_ False)
+                                              (\b_ e_ -> s b_ e_ True)
                                               b e
 {-# INLINE atEnd #-}
 
@@ -172,68 +107,81 @@ endOfInput = YaraParser $ \b e l s ->
                                      (\b_ e_ _   -> s b_ e_ ())
 {-# INLINE endOfInput #-}
 
-
-
 --- UTILITY PARSERS
 
-pair :: YaraParser a -> YaraParser b -> YaraParser (a,b)
-pair u v = do
-  x <- u
-  !y <- v
-  pure (x,y)
+-- | Run two parsers and return the pair of their results,
+-- while running a possible seperator parser
+pair :: YaraParser a -> Maybe (YaraParser s) -> YaraParser b -> YaraParser (a,b)
+pair u p v = liftA2 (,) (u <* maybe def void p) v
 {-# INLINE pair #-}
 
--- | /(<^>)/ combines two parsers and returns the combination of the results, in order.
--- Both must be successfull for the combo to be successfull.
-(<^>) :: (Semigroup a) => YaraParser a -> YaraParser a -> YaraParser a
-(<^>) u v = do
-  x <- u
-  !y <- v
-  return $ x <> y
-{-# INLINE (<^>) #-}
-
-untuple :: Applicative f => (f a, f b) -> f (a,b)
-untuple (b,c) = do
-  y <- b
-  !x <- c
-  pure (y,x)
+untuple :: (YaraParser a, YaraParser b) -> YaraParser (a,b)
+untuple (u,v) = pair u Nothing v
 {-# INLINE untuple #-}
-{-# SPECIALIZE untuple :: (YaraParser a, YaraParser b) -> YaraParser (a,b) #-}
-
--- | Name the parser, in case failure occurs.
-(<?>) :: YaraParser a -> ByteString -> YaraParser a
-par <?> msg = YaraParser $ \b e l s ->
-   runParser par b e (\b_ e_ s_ m_ -> l b_ e_ (msg:s_) m_) s
-
-
-{-# INLINE (<?>) #-}
 
 option :: a -> YaraParser a -> YaraParser a
-option x p = p <|> pure x
+option x p = p <|> pure x <?> "option"
 {-# INLINE option #-}
+
+-- | @perhaps@ returns `Just` results if parser succeeds, otherwise
+-- returns nothing
+perhaps :: YaraParser a -> YaraParser (Maybe a)
+perhaps v = (Just <$> v) <|> def <?> "perhaps"
+--{-# SPECIALIZE perhaps :: YaraParser (Sea -> YaraParser  #-}
+{-# INLINE perhaps #-}
+
+-- Is point-free style ever slower or does ghc optimize it all equivalently?
+-- option = (flip (<|>)) . pure
+-- maybe = (option Nothing) . (Just <$>)
 
 many1 :: YaraParser a -> YaraParser [a]
 many1 p = liftA2 (:) p (many p)
 {-# INLINE many1 #-}
 
 sepBy :: YaraParser a -> YaraParser s -> YaraParser [a]
-sepBy p s = liftA2 (:) p ((s *> sepBy1 p s) <|> pure []) <|> pure []
+sepBy p s = liftA2 (:) p ((s *> sepBy1 p s) <|> def) <|> def <?> "sepBy"
 {-# INLINE sepBy #-}
 
+sepBySet :: Ord a => YaraParser a -> YaraParser s -> YaraParser (Set.Set a)
+sepBySet p s = liftA2 Set.insert p ((s *> sepBy1Set p s) <|> def) <|> def
+{-# INLINE sepBySet #-}
+
+sepByMap :: Ord k => YaraParser (k,a)
+                  -> YaraParser s
+                  -> YaraParser (Map.Map k a)
+sepByMap p s =
+  liftA2 (uncurry Map.insert) p ((s *> sepBy1Map p s) <|> def) <|> def
+{-# INLINE sepByMap #-}
+
+sepBySeq :: YaraParser a -> YaraParser s -> YaraParser (Seq.Seq a)
+sepBySeq p s = liftA2 (<|) p ((s *> sepBy1Seq p s) <|> def) <|> def
+{-# INLINE sepBySeq #-}
+
 sepBy1 :: YaraParser a -> YaraParser s -> YaraParser [a]
-sepBy1 p s = scan
-    where scan = liftA2 (:) p ((s *> scan) <|> pure [])
+sepBy1 p s = let go = liftA2 (:) p ((s *> go) `mplus` def) in go
 {-# INLINE sepBy1 #-}
 
+sepBy1Set :: Ord a => YaraParser a -> YaraParser s -> YaraParser (Set.Set a)
+sepBy1Set p s = let go = liftA2 Set.insert p ((s *> go) `mplus` def) in go
+{-# INLINE sepBy1Set #-}
+
+sepBy1Map :: Ord k => YaraParser (k,a)
+                          -> YaraParser s -> YaraParser (Map.Map k a)
+sepBy1Map p s =
+  let go = liftA2 (uncurry Map.insert) p ((s *> go) `mplus` def) in go
+{-# INLINE sepBy1Map #-}
+
+sepBy1Seq :: YaraParser a -> YaraParser s -> YaraParser (Seq.Seq a)
+sepBy1Seq p s = let go = liftA2 (<|) p ((s *> go) `mplus` def) in go
+{-# INLINE sepBy1Seq #-}
+
 manyTill :: YaraParser a -> YaraParser b -> YaraParser [a]
-manyTill p end = scan
-    where scan = (end $> []) <|> liftA2 (:) p scan
+manyTill p end = (end $> []) <|> liftA2 (:) p (manyTill p end)
 {-# INLINE manyTill #-}
 
 -- | Skip zero or more instances of an action.
 skipMany :: YaraParser a -> YaraParser ()
-skipMany p = scan
-    where scan = (p *> scan) <|> pure ()
+skipMany p = (p *> skipMany p) <|> def
 {-# INLINE skipMany #-}
 
 -- | Skip one or more instances of an action.
@@ -246,155 +194,161 @@ count :: Int -> YaraParser a -> YaraParser [a]
 count = replicateM
 {-# INLINE count #-}
 
+--sepByByte :: Semigroup a
+--             => Byte -> YaraParser a -> YaraParser b -> YaraParser (a,b)
+--sepByByte b q p = pair (q <* space1 <* byte b <* space1) p
 
 
 -- SPECIFIC WORD8 PARSERS
 
-openCurl :: YaraParser Word8
-openCurl = word8 123
-{-# INLINE openCurl  #-}
+openCurl :: YaraParser Byte
+openCurl = byte 123
+{-# INLINE openCurl #-}
 
-closeCurl :: YaraParser Word8
-closeCurl = word8 125
-{-# INLINE closeCurl  #-}
+closeCurl :: YaraParser Byte
+closeCurl = byte 125
+{-# INLINE closeCurl #-}
 
-openParen :: YaraParser Word8
-openParen = word8 40
+openParen :: YaraParser Byte
+openParen = byte 40
 {-# INLINE openParen #-}
 
-closeParen :: YaraParser Word8
-closeParen = word8 41
+closeParen :: YaraParser Byte
+closeParen = byte 41
 {-# INLINE closeParen #-}
 
-sqBra :: YaraParser Word8
-sqBra  = word8 91
+sqBra :: YaraParser Byte
+sqBra  = byte 91
 {-# INLINE sqBra #-}
 
-sqKet :: YaraParser Word8
-sqKet  = word8 93
+sqKet :: YaraParser Byte
+sqKet  = byte 93
 {-# INLINE sqKet #-}
 
-bSlash :: YaraParser Word8
-bSlash = word8 92
+bSlash :: YaraParser Byte
+bSlash = byte 92
 {-# INLINE bSlash #-}
 
-fSlash :: YaraParser Word8
-fSlash = word8 47
+fSlash :: YaraParser Byte
+fSlash = byte 47
 {-# INLINE fSlash #-}
 
-tab :: YaraParser Word8
-tab = word8 09
+tab :: YaraParser Byte
+tab = byte 09
 {-# INLINE tab #-}
 
-vertBar :: YaraParser Word8
-vertBar = word8 124
+vertBar :: YaraParser Byte
+vertBar = byte 124
 {-# INLINE vertBar #-}
 
-dash :: YaraParser Word8
-dash = word8 45
+dash :: YaraParser Byte
+dash = byte 45
 {-# INLINE dash #-}
 
-colon :: YaraParser Word8
-colon = word8 58
+colon :: YaraParser Byte
+colon = byte 58
 {-# INLINE colon #-}
 
-equal :: YaraParser Word8
-equal = word8 61
+equal :: YaraParser Byte
+equal = byte 61
 {-# INLINE equal #-}
 
-lt :: YaraParser Word8
-lt     = word8 60
+lt :: YaraParser Byte
+lt = byte 60
 {-# INLINE lt #-}
 
-gt :: YaraParser Word8
-gt     = word8 62
+gt :: YaraParser Byte
+gt = byte 62
 {-# INLINE gt #-}
-at :: YaraParser Word8
-at     = word8 64
+at :: YaraParser Byte
+at = byte 64
 {-# INLINE at #-}
 
-quote :: YaraParser Word8
-quote = word8 34
+quote :: YaraParser Byte
+quote = byte 34
 {-# INLINE quote #-}
 
 
 
 -- FAST PREDICATES
 
-isAlpha :: Word8 -> Bool
-isAlpha w = w - 65 <= 26 || w - 97 <= 26
+isAlpha :: Byte -> Bool
+isAlpha b = b - 65 < 26 || b - 97 < 26
 {-# INLINE isAlpha #-}
 
 -- | A fast digit predicate.
-isDigit :: Word8 -> Bool
-isDigit w = w - 48 <= 9
+isDigit :: Byte -> Bool
+isDigit b = b - 48 <= 9
 {-# INLINE isDigit #-}
 
-isAlphaNum :: Word8 -> Bool
+isAlphaNum :: Byte -> Bool
 isAlphaNum = isDigit <> isAlpha
 {-# INLINE isAlphaNum #-}
 
-isSpace :: Word8 -> Bool
-isSpace w = w == 32 || w - 9 <= 4
+isSpace :: Byte -> Bool
+isSpace b = b == 32 || b - 9 <= 4
 {-# INLINE isSpace #-}
 
 -- | A predicate that matches either a carriage return @\'\\r\'@ or
 -- newline @\'\\n\'@ character.
-isEndOfLine :: Word8 -> Bool
-isEndOfLine w = w == 13 || w == 10
+isEndOfLine :: Byte -> Bool
+isEndOfLine = (== 13) <> (== 10)
 {-# INLINE isEndOfLine #-}
 
 -- | A predicate that matches either a space @\' \'@ or horizontal tab
 -- @\'\\t\'@ character.
-isHorizontalSpace :: Word8 -> Bool
-isHorizontalSpace w = w == 32 || w == 9
+isHorizontalSpace :: Byte -> Bool
+isHorizontalSpace = (== 32) <> (== 9)
 {-# INLINE isHorizontalSpace #-}
 
 
 
 --- FAST PREDICATE PARSERS
 
--- | Peek at next word8. Doesn't fail unless at end of input.
-peekWord8 :: YaraParser Word8
-peekWord8 = YaraParser $ \b e l s ->
+-- | Peek at next byte.
+--
+-- Note: Doesn't fail unless at the end of input.
+peekByte :: YaraParser Byte
+peekByte = YaraParser $ \b e l s ->
   let pos = position e in
   if bufferLengthAtLeast pos 1 b
      then s b e (bufferUnsafeIndex b pos)
-     else ensureSuspended 1 b e l (\b e bs -> s b e $! unsafeHead bs)
-{-# INLINE peekWord8 #-}
+     else ensureSuspended 1 b e l (\b_ e_ bs_ -> s b_ e_ $! unsafeHead bs_)
+{-# INLINE peekByte #-}
 
-satisfy :: (Word8 -> Bool) -> YaraParser Word8
+satisfy :: (Byte -> Bool) -> YaraParser Byte
 satisfy p = do
-  h <- peekWord8
+  h <- peekByte
   if p h
-    then advance 1 >> return h
+    then advance 1 >> pure h
     else fail "satisfy"
 {-# INLINE satisfy #-}
 
 -- | Match a specific byte.
-word8 :: Word8 -> YaraParser Word8
-word8 c = satisfy (== c) <?> singleton c
-{-# INLINE word8 #-}
+byte :: Byte -> YaraParser Byte
+byte c = satisfy (== c) <?> singleton c
+{-# INLINE byte #-}
 
-anyWord8 :: YaraParser Word8
-anyWord8 = satisfy $ const True
-{-# INLINE anyWord8 #-}
+anyByte :: YaraParser Byte
+anyByte = satisfy $ const True
+{-# INLINE anyByte #-}
 
 -- | Match either a single newline character @\'\\n\'@, or a carriage
 -- return followed by a newline character @\"\\r\\n\"@.
 endOfLine :: YaraParser ()
-endOfLine = void (word8 10) <|> void (string "\r\n")
+endOfLine = void (byte 10) <|> void (string "\r\n")
 
 -- | Match any byte except the given one.
-notWord8 :: Word8 -> YaraParser Word8
-notWord8 c = satisfy (/= c) <?> "not '" +> c ++ "'"
-{-# INLINE notWord8 #-}
+notByte :: Byte -> YaraParser Byte
+notByte c = satisfy (/= c) <?> "not '" +> c ++ "'"
+{-# INLINE notByte #-}
 
-alphaNum :: YaraParser Word8
+
+alphaNum :: YaraParser Byte
 alphaNum = satisfy isAlphaNum  <?> "alphaNum"
 {-# INLINE alphaNum #-}
 
-space :: YaraParser Word8
+space :: YaraParser Byte
 space = satisfy isSpace <?> "space"
 {-# INLINE space #-}
 
@@ -406,11 +360,9 @@ space1 :: YaraParser ByteString
 space1 = takeWhile1 isSpace <?> "space1"
 {-# INLINE space1 #-}
 
-horizontalSpace :: YaraParser Word8
+horizontalSpace :: YaraParser Byte
 horizontalSpace = satisfy isHorizontalSpace <?> "horizontalSpace"
 {-# INLINE horizontalSpace #-}
-
-
 
 --- | PARSER COMBINATORS
 
@@ -419,9 +371,9 @@ horizontalSpace = satisfy isHorizontalSpace <?> "horizontalSpace"
 --
 -- >skipDigit = skip isDigit
 -- >    where isDigit w = w >= 48 && w <= 57
-skip :: (Word8 -> Bool) -> YaraParser ()
+skip :: (Byte -> Bool) -> YaraParser ()
 skip p = do
-  h <- peekWord8
+  h <- peekByte
   if p h
     then advance 1
     else fail "skip"
@@ -429,50 +381,23 @@ skip p = do
 -- | skipTo
 -- Gobbles up horizontal space then applies parser
 skipTo :: YaraParser a -> YaraParser a
-skipTo p = takeWhile isHorizontalSpace *> p
+skipTo p = skip isSpace *> p
 {-# INLINE skipTo #-}
 
 -- | skipTo1
 -- same as skipTo but requires the occurance of atleast 1 horizonal space
-skipTo1 :: YaraParser a -> YaraParser a
-skipTo1 p = takeWhile1 isHorizontalSpace *> p
-{-# INLINE skipTo1 #-}
-
--- | skipToLn
--- gobbles up all whitespace, including newlines, then applyies parser
-skipToLn :: YaraParser a -> YaraParser a
-skipToLn p = takeWhile isSpace *> p
-{-# INLINE skipToLn #-}
+skipToHz1 :: YaraParser a -> YaraParser a
+skipToHz1 p = takeWhile1 isHorizontalSpace *> p
+{-# INLINE skipToHz1 #-}
 
 -- | skipToLn1
 -- | sames as skipToLn but requiring atleast one whitespace occurance
-skipToLn1 :: YaraParser a -> YaraParser a
-skipToLn1 p = takeWhile1 isSpace *> p
-{-# INLINE skipToLn1 #-}
-
-hexadecimal :: (Integral a, Bits a) => YaraParser a
-hexadecimal = foldl' step 0 `fmap` takeWhile1 isHexDigit
-  where
-    isHexDigit :: Word8 -> Bool
-    isHexDigit w = (w >= 48 && w <= 57) ||
-                   (w >= 97 && w <= 102) ||
-                   (w >= 65 && w <= 70)
-    step a w | w >= 48 && w <= 57  = (a `shiftL` 4) .|. fromIntegral (w - 48)
-             | w >= 97             = (a `shiftL` 4) .|. fromIntegral (w - 87)
-             | otherwise           = (a `shiftL` 4) .|. fromIntegral (w - 55)
-{-# SPECIALISE hexadecimal :: YaraParser Int #-}
-{-# SPECIALISE hexadecimal :: YaraParser Integer #-}
-{-# SPECIALISE hexadecimal :: YaraParser Word #-}
-
-decimal :: Integral a => YaraParser a
-decimal = foldl' step 0 `fmap` takeWhile1 isDigit
-  where step a w = a * 10 + fromIntegral (w - 48)
-{-# SPECIALISE decimal :: YaraParser Int #-}
-{-# SPECIALISE decimal :: YaraParser Integer #-}
-{-# SPECIALISE decimal :: YaraParser Word #-}
+skipTo1 :: YaraParser a -> YaraParser a
+skipTo1 p = takeWhile1 isSpace *> p
+{-# INLINE skipTo1 #-}
 
 -- | Skip past input for as long as the predicate returns 'True'.
-skipWhile :: (Word8 -> Bool) -> YaraParser ()
+skipWhile :: (Byte -> Bool) -> YaraParser ()
 skipWhile p = go
  where
   go = do
@@ -481,23 +406,46 @@ skipWhile p = go
     when continue go
 {-# INLINE skipWhile #-}
 
-takeTill :: (Word8 -> Bool) -> YaraParser ByteString
+takeTill :: (Byte -> Bool) -> YaraParser ByteString
 takeTill p = takeWhile (not . p)
 {-# INLINE takeTill #-}
 
+-- | @followedBy p@ only succeeds when parser @p@ succeeds.
+--
+-- Note: does not consume any input. It tests if the parser would succeed.
+-- When parsing keywords or name spaces, we usually want
+-- to make ensure such is followed by a whitespace.
+--
+-- Note: /Backtracking is expensive/. The combinators is mostly to be used
+-- on single byte parsing predicates.
+--
+-- Why the type @YaraParser a -> YaraParser ()@, instead of say
+-- @(Word8 -> Bool) -> YaraParser ()@ if its used primarily for matching on
+-- single bytes? Occasionally we do need to match on a pair of bytes.
+--
+--
+-- End lines are sometimes not just a byte but a pair of bytes "\r\n" so
+-- we can pass in any parser ('void'-ing out result type if needed).
+followedBy :: YaraParser a -> YaraParser ()
+followedBy p = YaraParser $ \b e l s ->
+  case parse (void p) e (bufferUnsafeDrop (position e) b) of
+    Fail{}    -> l b e [] "followedBy"
+    Done{}    -> s b e ()
+    Partial{} -> prompt (\b_ e_ -> s b_ e_ ())
+                        (\b_ e_ -> l b_ e_ ["followedBy"] "followedBy")
+                        b e
 
 
-
-takeWhile :: (Word8 -> Bool) -> YaraParser ByteString
+takeWhile :: (Byte -> Bool) -> YaraParser ByteString
 takeWhile p = do
     s <- BS.takeWhile p <$> getBuff
     continue <- atleastBytesLeft (length s)
     if continue
-      then takeWhileAcc p [s]
-      else return s
+      then takeWhileAcc p s
+      else pure s
 {-# INLINE takeWhile #-}
 
-takeWhile1 :: (Word8 -> Bool) -> YaraParser ByteString
+takeWhile1 :: (Byte -> Bool) -> YaraParser ByteString
 takeWhile1 p = do
   (`when` void demandInput) =<< endOfBuffer
   s <- BS.takeWhile p <$> getBuff
@@ -508,19 +456,18 @@ takeWhile1 p = do
       advance len
       eoc <- endOfBuffer
       if eoc
-        then takeWhileAcc p [s]
-        else return s
+        then takeWhileAcc p s
+        else pure s
 {-# INLINE takeWhile1 #-}
 
-takeWhileAcc :: (Word8 -> Bool) -> [ByteString] -> YaraParser ByteString
+takeWhileAcc :: (Byte -> Bool) -> ByteString -> YaraParser ByteString
 takeWhileAcc p = go
-  where
-    go acc = do
-      s <- BS.takeWhile p <$> getBuff
-      continue <- atleastBytesLeft (length s)
-      if continue
-        then go (s:acc)
-        else return $ concatReverse (s:acc)
+  where go acc = do
+          s <- BS.takeWhile p <$> getBuff
+          continue <- atleastBytesLeft (length s)
+          if continue
+           then go $ acc ++ s
+           else pure $ acc ++ s
 {-# INLINE takeWhileAcc #-}
 
 between :: YaraParser o
@@ -533,19 +480,262 @@ between :: YaraParser o
 between op cp p = op *> skipTo p <* skipTo cp
 {-# INLINE between #-}
 
-flank :: YaraParser b -> YaraParser a -> YaraParser a
-flank del par = between del del par
-{-# INLINE flank #-}
-
 -- | A generic "grouping" parser that take any parser. So,
 --      /parse (grouping alphaNums) "(abc|def|ghi|jkl)"
 --                                = Done "fromList[abc,def,ghi,jkl]" ""/
--- Note: ignores extraneous whitespaces between instances of parser and seperators.
+--
+-- Note: ignores extraneous whitespaces between instances of parser and
+--       seperators.
+--
 -- Note: the parser must succeed atleast once (so "(p)" will pass but not "()").
 grouping :: YaraParser a -> YaraParser [a]
 grouping p = between openParen closeParen $ interleaved vertBar p
   where interleaved s par = sepBy1 par (skipTo s <* spaces)
 {-# INLINE grouping #-}
+{-}
+-- | `quotedString` parses a string literal
+-- Strings can contain the following escape bytes \" \\ \t \n \r and handle
+-- string line breaks.
+-- Returns the content of the string without the quotation bytes.
+-- Careful as Haskell style strings differ from C style string literals
+-- THESE parse as C style
+quotedString :: YaraParser ByteString
+quotedString = quotedStringWith (const True)
+
+data ScanStatus =
+    SeekingNewLine
+  | SS
+
+-- | `quotedStringWith` parses a string literal, but only if all the bytes
+-- satisfy the predicate
+--
+-- Todo: need to be able to return the status of exit as well to handle exit
+--       error reporting.
+quotedStringWith :: (Word8 -> Bool) -> YaraParser ByteString
+quotedStringWith f = quote *> scan False go <* quote <?> "litString"
+  where
+    -- s - stores previous char
+    go s w = if
+        -- If unescaped quote mark, the string is closed
+        | (s /= 92 && w == 34)  -> Nothing
+        -- If byte doesn't satisfy predicate
+        
+        -- Quote, preceeded by backslash is cool.
+        | s == 92 && w == 34   -> if p w
+                then Just w
+                else Nothing
+        | s == 92 && (isSpace w || w == 10 || w == 13)  -> Just s
+-}
+-- | Match a specific string.
+string :: ByteString -> YaraParser ByteString
+string bs = stringWithMorph id bs
+{-# INLINE string #-}
+
+-- | Satisfy a literal string, ignoring case.
+-- ASCII-specific but fast, oh yes.
+stringIgnoreCase :: ByteString -> YaraParser ByteString
+stringIgnoreCase = stringWithMorph (map toLower)
+  where toLower b | b >= 65 && b <= 90 = b + 32
+                  | otherwise          = b
+{-# INLINE stringIgnoreCase #-}
+
+-- | To annotate
+stringWithMorph :: (ByteString -> ByteString)
+                -> ByteString -> YaraParser ByteString
+stringWithMorph f s = string_ (stringSuspend f) f s where
+
+  string_ :: (forall r. ByteString -> ByteString -> Buffer -> Env
+          -> Failure r -> Success ByteString r -> Result r)
+          -> (ByteString -> ByteString) -> ByteString -> YaraParser ByteString
+  string_ suspended f s0 = YaraParser $ \b e l s ->
+    let bs = f s0
+        n = length bs
+        pos = position e
+        b_ = substring pos n b
+        t_ = bufferUnsafeDrop pos b
+    in if
+      | bufferLengthAtLeast pos n b && (bs == f b_)  -> s b (posMap (+n) e) b_
+      | f t_ `isPrefixOf` bs   -> suspended bs (drop (length t_) bs) b e l s
+      | otherwise              -> l b e [] "string"
+
+  stringSuspend :: (ByteString -> ByteString)
+                -> ByteString -> ByteString -> Buffer -> Env
+                -> Failure r -> Success ByteString r -> Result r
+  stringSuspend f s0 s1 = runParser (demandInput >>= go) where
+    m = length s1
+    go str = YaraParser $ \b e l s -> let n = length (f str) in
+      if | n >= m && unsafeTake m (f str) == s1 ->
+               let o = length s0
+               in s b (posMap (+o) e) (substring (position e) o b)
+         | str == unsafeTake n s1 ->
+               stringSuspend f s0 (unsafeDrop n s1) b e l s
+         | otherwise              -> l b e [] "string"
+{-# INLINE stringWithMorph #-}
+
+-- | Checks if there are atleast `n` bytes of buffer string left.
+-- Parse always succeeds
+atleastBytesLeft :: Int -> YaraParser Bool
+atleastBytesLeft i = YaraParser $ \b e _ s ->
+  let pos = position e + i in
+  if pos < bufferLength b || moreInput e == Complete
+    then s b (e { position = pos}) False
+    else prompt (\b_ e_ -> s b_ e_ False)
+                (\b_ e_ -> s b_ e_ True)
+                b
+                (e {position = pos})
+{-# INLINE atleastBytesLeft #-}
+
+ensureSuspended :: Int -> Buffer -> Env
+                -> Failure r
+                -> Success ByteString r
+                -> Result r
+ensureSuspended n = runParser (demandInput >> go)
+  where go = YaraParser $ \b e l s ->
+          let pos = position e in
+          if bufferLengthAtLeast pos n b
+            then s b e (substring pos n b)
+            else runParser (demandInput >> go) b e l s
+{-# INLINE ensureSuspended #-}
+
+{-
+-- | If at least @n@ elements of input are available, return the
+-- current input, otherwise fail.
+ensure :: Int -> YaraParser ByteString
+ensure n = (YaraParser $ \b e l s ->
+    let pos = position e in
+    if bufferLengthAtLeast pos n b
+      then s b e (substring pos n b)
+      -- The uncommon case is kept out-of-line to reduce code size:
+      else ensureSuspended n b e l s
+    ) <?> "ensure"
+{-# INLINE ensure #-}
+-}
+
+-- | Immediately demand more input via a 'Partial' continuation
+-- result.
+demandInput :: YaraParser ByteString
+demandInput = YaraParser $ \b e l s ->
+  case moreInput e of
+    Complete -> l b e [] "not enough input"
+    _        -> Partial $ \bs -> if null bs
+      then l b (e { moreInput = Complete }) [] "not enough input"
+      else s (bufferPappend b bs) (e { moreInput = Incomplete }) bs
+{-# INLINE demandInput #-}
+
+-- | Match on of a specific list of strings
+strings :: Foldable f => f ByteString -> YaraParser ByteString
+strings = foldMap string
+{-# INLINE strings #-}
+{-# SPECIALIZE strings :: Seq.Seq ByteString -> YaraParser ByteString #-}
+{-# SPECIALIZE strings :: [ByteString] -> YaraParser ByteString #-}
+
+data T s = T {-# UNPACK #-} !Int s
+
+-- | A stateful scanner.  The predicate consumes and transforms a
+-- state argument, and each transformed state is passed to successive
+-- invocations of the predicate on each byte of the input until one
+-- returns 'Nothing' or the input ends.
+--
+-- This parser does not fail.  It will return an empty string if the
+-- predicate returns 'Nothing' on the first byte of input.
+--
+-- /Note/: Because this parser does not fail, do not use it with
+-- combinators such as 'Control.Applicative.many', because such
+-- parsers loop until a failure occurs.  Careless use will thus result
+-- in an infinite loop.
+scan :: s -> (s -> Byte -> Maybe s) -> YaraParser ByteString
+scan s0 p = go "" s0 <?> "scan"
+  where
+    go acc s1 = do
+      let scanner (PS fp off len) =
+            withForeignPtr fp $ \ptr0 -> do
+              let done !i !s = pure (T i s)
+                  start = ptr0 `plusPtr` off
+                  end   = start `plusPtr` len
+                  inner ptr !s
+                    | ptr < end = do
+                      w <- peek ptr
+                      case p s w of
+                        Just s' -> inner (ptr `plusPtr` 1) s'
+                        _       -> done (ptr `minusPtr` start) s
+                    | otherwise = done (ptr `minusPtr` start) s
+              inner start s1
+      bs <- getBuff
+      let T i u = accursedUnutterablePerformIO $ scanner bs
+          !h = unsafeTake i bs
+      continue <- atleastBytesLeft i
+      if continue
+        then go (acc ++ h) u
+        else pure $! acc ++ h
+{-# INLINE scan #-}
+
+
+-- |
+--   'scan s p = scan_ s p id'
+--
+-- ghci$ pred s w = if w > 73 then Nothing else Just False
+-- ghci$ parse_ (scan_ False toLower pred) "ABCDEFGHIJKLMNOP"
+-- "Done" "JKLMNOP" "abcdefghi"
+--
+scan_ :: s
+      -- ^ Initial state
+      -> (s -> Byte -> Maybe s)
+      -- ^ State Transformation
+      -> (Byte -> Byte)
+      -- ^ Byte shift
+      -> YaraParser ByteString
+scan_ s0 p f = go "" s0 <?> "scan"
+  where
+    go acc s1 = do
+      let scanner (PS fp off len) =
+            withForeignPtr fp $ \ptr0 -> do
+              let done !i !s = pure $! T i s
+                  start = ptr0 `plusPtr` off
+                  inner ptr !s
+                    | ptr < (start `plusPtr` len) = do
+                        w <- peek ptr
+                        case p s w of
+                          Just s' -> do
+                            pokeByteOff ptr 0 (f w)
+                            inner (ptr `plusPtr` 1) s'
+                          _       -> done (ptr `minusPtr` start) s
+                    | otherwise = done (ptr `minusPtr` start) s
+              inner start s1
+      bs <- getBuff
+      let T i u = accursedUnutterablePerformIO $ scanner bs
+          !h = unsafeTake i bs
+      continue <- atleastBytesLeft i
+      if continue
+        then go (acc ++ h) u
+        else pure $! acc ++ h
+{-# INLINE scan_ #-}
+
+
+
+
+
+{-
+sepByw :: Default (f a)
+      => (a -> f a -> f a)
+      -> YaraParser a
+      -> YaraParser s
+      -> YaraParser (f a)
+sepByw f p s = liftA2 f p ((s *> sepByw1 f p s) <|> def) <|> def
+{-# INLINE sepByw #-}
+
+sepByw1 :: Default (f a)
+        => (a -> f a -> f a)
+        -> YaraParser a
+        -> YaraParser s
+        -> YaraParser (f a)
+sepByw1 f p s = let go = liftA2 f p ((s *> go) `mplus` def) in go
+{-# SPECIALIZE sepByw1 :: (a -> Set.Set a -> Set.Set a) -> YaraParser a
+                                  -> YaraParser s -> YaraParser (Set.Set a) #-}
+{-# INLINE sepByw1 #-}
+
+
+
+
 
 -- | litString parses a literal string
 -- Strings can contain the following escape bytes \" \\ \t \n \r and handle
@@ -564,6 +754,7 @@ litString = quote *> (go "") <* quote <?> "litString"
       | s == 92 && (isSpace w || isNewline w)  = Just ~~tricky
 
 
+{-
     go acc = do
       -- Take till a quote, newline, or backslash
       bs <- takeTill $ \q -> q `elem` [92, 34, 10]
@@ -599,179 +790,8 @@ litString = quote *> (go "") <* quote <?> "litString"
         -- Shuts up incomplete-patterns
         _  -> fault "How did you get here?"
     notSpace = not . isSpace
-
+-}
 -- MATCH STRINGS
-
-
--- | Match a specific string.
-string :: ByteString -> YaraParser ByteString
-string bs = stringWithMorph id bs
-{-# INLINE string #-}
-
--- | Satisfy a literal string, ignoring case.
--- ASCII-specific but fast, oh yes.
-stringIgnoreCase :: ByteString -> YaraParser ByteString
-stringIgnoreCase b = stringWithMorph (map toLower) b
-  where toLower w | w >= 65 && w <= 90 = w + 32
-                  | otherwise          = w
-{-# INLINE stringIgnoreCase #-}
-
--- | To annotate
-stringWithMorph :: (ByteString -> ByteString)
-                -> ByteString -> YaraParser ByteString
-stringWithMorph f s = string_ (stringSuspended f) f s
-{-# INLINE stringWithMorph #-}
-
--- | To annotate
-string_ :: (forall r. ByteString -> ByteString -> Buffer -> Env
-            -> Failure r -> Success ByteString r -> Result r)
-        -> (ByteString -> ByteString)
-        -> ByteString -> YaraParser ByteString
-string_ suspended f s0 = YaraParser $ \b e l s ->
-  let bs = f s0
-      n = length bs
-      pos = position e
-      b_ = substring pos n b
-      t_ = bufferUnsafeDrop pos b
-  in if
-    | bufferLengthAtLeast pos n b && (bs == f b_)  -> s b (posMap (+n) e) b_
-    | f t_ `isPrefixOf` bs   -> suspended bs (drop (length t_) bs) b e l s
-    | otherwise              -> l b e [] "string"
-{-# INLINE string_ #-}
-
-stringSuspended :: (ByteString -> ByteString)
-                -> ByteString -> ByteString -> Buffer -> Env
-                -> Failure r -> Success ByteString r -> Result r
-stringSuspended f s0 s1 = runParser (demandInput >>= go)
-  where
-    m  = length s1
-    go str = YaraParser $ \b e l s -> let n = length (f str) in if
-        | n >= m && unsafeTake m (f str) == s1 ->
-                           let o = length s0
-                           in s b (posMap (+o) e) (substring (position e) o b)
-        | str == unsafeTake n s1 -> stringSuspended f s0 (unsafeDrop n s1) b e l s
-        | otherwise              -> l b e [] "string"
-{-# INLINE stringSuspended #-}
-
--- | Checks if there are atleast `n` bytes of buffer string left.
--- Parse always succeeds
-atleastBytesLeft :: Int -> YaraParser Bool
-atleastBytesLeft i = YaraParser $ \b e _ s ->
-  let pos = position e + i in
-  if pos < bufferLength b || moreInput e == Complete
-    then s b (e { position = pos}) False
-    else prompt (\b_ e_ -> s b_ e_ False)
-                (\b_ e_ -> s b_ e_ True)
-                b
-                (e {position = pos})
-{-# INLINE atleastBytesLeft #-}
-
-ensureSuspended :: Int -> Buffer -> Env
-                -> Failure r
-                -> Success ByteString r
-                -> Result r
-ensureSuspended n = runParser (demandInput >> go)
-  where go = YaraParser $ \b e l s ->
-          let pos = position e in
-          if bufferLengthAtLeast pos n b
-            then s b e (substring pos n b)
-            else runParser (demandInput >> go) b e l s
-{-# INLINE ensureSuspended #-}
-
--- | If at least @n@ elements of input are available, return the
--- current input, otherwise fail.
-ensure :: Int -> YaraParser ByteString
-ensure n = (YaraParser $ \b e l s ->
-    let pos = position e in
-    if bufferLengthAtLeast pos n b
-      then s b e (substring pos n b)
-      -- The uncommon case is kept out-of-line to reduce code size:
-      else ensureSuspended n b e l s
-    ) <?> "ensure"
-{-# INLINE ensure #-}
-
--- | Immediately demand more input via a 'Partial' continuation
--- result.
-demandInput :: YaraParser ByteString
-demandInput = YaraParser $ \b e l s ->
-  case moreInput e of
-    Complete -> l b e [] "not enough input"
-    _        -> Partial $ \bs -> if null bs
-      then l b (e { moreInput = Complete }) [] "not enough input"
-      else s (bufferPappend b bs) (e { moreInput = Incomplete }) bs
-{-# INLINE demandInput #-}
-
--- | Match on of a specific list of strings
-strings :: Foldable f => f ByteString -> YaraParser ByteString
-strings = foldMap string
-{-# INLINE strings #-}
-{-# SPECIALIZE strings :: Seq.Seq ByteString -> YaraParser ByteString #-}
-{-# SPECIALIZE strings :: [ByteString] -> YaraParser ByteString #-}
-
-data T s = T {-# UNPACK #-} !Int s
-
--- | A stateful scanner.  The predicate consumes and transforms a
--- state argument, and each transformed state is passed to successive
--- invocations of the predicate on each byte of the input until one
--- returns 'Nothing' or the input ends.
---
--- This parser does not fail.  It will return an empty string if the
--- predicate returns 'Nothing' on the first byte of input.
---
--- /Note/: Because this parser does not fail, do not use it with
--- combinators such as 'Control.Applicative.many', because such
--- parsers loop until a failure occurs.  Careless use will thus result
--- in an infinite loop.
-scan :: s -> (s -> Word8 -> Maybe s) -> YaraParser ByteString
-scan s0 p = go [] s0 <?> "scan"
-  where
-    go acc s1 = do
-      let scanner (PS fp off len) =
-            withForeignPtr fp $ \ptr0 -> do
-              let done !i !s = return (T i s)
-                  start = ptr0 `plusPtr` off
-                  end   = start `plusPtr` len
-                  inner ptr !s
-                    | ptr < end = do
-                      w <- peek ptr
-                      case p s w of
-                        Just s' -> inner (ptr `plusPtr` 1) s'
-                        _       -> done (ptr `minusPtr` start) s
-                    | otherwise = done (ptr `minusPtr` start) s
-              inner start s1
-      bs <- getBuff
-      let T i p = inlinePerformIO $ scanner bs
-          !h = unsafeTake i bs
-      continue <- atleastBytesLeft i
-      if continue
-        then go (h:acc) p
-        else return $! concatReverse (h:acc)
-{-# INLINE scan #-}
-
-
-
-
-
-
-{-
-
--- | litString parses a literal string
--- Strings can contain the following escape bytes \" \\ \t \n \r and handle
--- string line breaks.
--- Returns the content of the string without the quotation bytes.
-litString :: YaraParser ByteString
-litString = quote *> (go "") <* quote <?> "litString"
-  where
-    -- s - stores previous char
-    go s w
-      -- If quote, not preceeded by backslash, the string is closed.
-      | s /= 92 && w == 34   = Nothing
-      -- Quote, preceeded by backslash is cool. 
-      | s == 92 && w == 34   = Just w
-
-      | s == 92 && (isSpace w || isNewline w)  = Just ~~tricky
-
-
     go acc = do
       -- Take till a quote, newline, or backslash
       bs <- takeTill $ \q -> q `elem` [92, 34, 10]
@@ -838,7 +858,7 @@ takeNWhile :: Int -> (Word8 -> Bool) -> YaraParser ByteString
 takeNWhile n p = do
   (`when` demandInput) =<< endOfBuffer
   s <- BS.takeWhile p <$> getBuff
-  continue <- inputSpansChunks (length s)
+  continue <- inptSpansChunks (length s)
   if continue
     then takeWhileAcc p [s]
     else return s

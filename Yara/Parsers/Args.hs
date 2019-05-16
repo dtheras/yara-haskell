@@ -1,7 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE LambdaCase #-}
-
 -- |
 -- Module      :  Yara.Parsers.Args
 -- Copyright   :  David Heras 2018-2019
@@ -12,8 +10,11 @@
 -- Portability :  unknown
 --
 -- Parse and handle command line arguments
-
-module Args (parseArgs , showHelp) where
+-- 
+module Args (
+    parseArgs  --  :: [ByteString] -> Result Env
+  , showHelp   --  :: ByteString
+  ) where
 
 import Prelude hiding ((++), takeWhile, reverse, all, unlines, unwords,
                        head, take, drop, concat, splitAt)
@@ -23,38 +24,51 @@ import Data.ByteString.Char8 (unlines, unwords)
 import qualified Data.Map.Strict as Map
 import Data.Sequence ((<|))
 import Control.Monad.State.Strict
-import GHC.Word
-import Buffer
+    -----
 import Combinators
 import Parser
 import Rules
 import Types
 import Utilities
 
--- | Doesn't accept non-visible characters for Windows or Posix
+-- Doesn't accept non-visible characters for Windows or Posix
 -- Windows excludes:  <  >  :  "  /  \  |  ?  *
-badFilepathByte :: Word8 -> Bool
+badFilepathByte :: Byte -> Bool
 badFilepathByte w = not $ if onWindows
   then w - 35 <= 6 || w - 43 <= 3 || w - 48 <= 9 || w == 59
                           || w == 61 || w - 64 <= 27 || w == 93
                           || w - 95 <= 28 || w == 123 || w == 126
   else w - 33 <= 58 || w - 93 <= 33
 {-# INLINE badFilepathByte #-}
-
-filepath :: YaraParser ByteString
-filepath = do
-  fp <- scan False p
-  w  <- peekWord8
-  when_ (isSpace w)
-        ("Encounter bad filepath character '" +> w ++ "'")
+{-
+filepathQuoted :: YaraParser ByteString
+filepathQuoted = quotedStringWith badFilepathByte
+      | w == 42 && not b   = Just True  -- if escaped wildcard, keep going
+{-# INLINE filepathQuoted #-}
+-}
+filepathUnquoted :: YaraParser ByteString
+filepathUnquoted = do
+  fp <- scan False $ \b w -> if
+      | badFilepathByte w  -> Nothing    -- if not fp char, done
+      | w == 32 && not b   -> Nothing    -- if unescaped space, done
+      | w == 92 && not b   -> Just True  -- if escaped space, keep going
+      | otherwise          -> Just False -- else keep going
+  -- 'scan' will exit on any non-filepath character.
+  -- So, check if 'scan' exited due to that or unescaped space.
+  n  <- peekByte
+  when_ (isSpace n)
+        ("Encounter bad filepath character '" +> n ++ "'")
         (return fp)
   <?> "filepath"
-  where p b w | badFilepathByte w       = Nothing
-              | w == 32 && b == False   = Nothing
-              | w == 92 && b == False   = Just True
-              | otherwise               = Just False
+{-# INLINE filepathUnquoted #-}
+{-
+-- | `filepath` parses filepath passed into the command line, either style
+--  quoted style:    $ prog --flag="some/random filepath"
+--  unquoted style:  $ prog --flag=some/random\ filepath
+filepath :: YaraParser ByteString
+filepath = filepathQuoted <|> filepathUnquoted
 {-# INLINE filepath #-}
-
+-}
 value :: YaraParser Value
 value = Value_B <$> bool <|> Value_I <$> decimal <|> Value_S <$> takeWhile (const True)
 {-# INLINE value #-}
@@ -74,17 +88,17 @@ getArg :: YaraParser ByteString
 getArg = do
   spaces
   arg <- scan False p
-  w <- peekWord8
-  when_ (w < 32) "Encountered bad command line character!" $ return arg
+  w <- peekByte
+  when_ (w < 32) "Encountered bad command line character!" $ pure arg
   <?> "getArg"
-  where p b w | w < 32                  = Nothing
-              | w == 32 && b == False   = Nothing
-              | w == 92 && b == False   = Just True
-              | otherwise               = Just False
+  where p b w | w < 32            = Nothing
+              | w == 32 && not b  = Nothing
+              | w == 92 && not b  = Just True
+              | otherwise         = Just False
 {-# INLINE getArg #-}
 
-showHelp :: IO ()
-showHelp = putErr $ unlines [
+showHelp :: ByteString
+showHelp = unlines [
       "YARA-HS 0.0.1, the pattern matching swiss army knife."
     , "Usage: yara [OPTION]... [NAMESPACE:]RULES_FILE... FILE | DIR | PID"
     , ""
@@ -114,7 +128,7 @@ data ArgN = Arg0 ByteString             (YaraParser ())
 infixl 1 =?
 {-# INLINE (=?) #-}
 
-args :: Map.Map (Word8, ByteString) ArgN
+args :: Map.Map (Byte, ByteString) ArgN
 args = Map.fromList [
     65  =? "atom-quality-table"   =? Arg1 "path to a file with the atom quality table" "FILE" handleAtomTable
   , 67  =? "compiled-rules"       =? Arg0 "load compiled rules" (modify $ \e -> e { compiledRules = True })
@@ -146,7 +160,7 @@ args = Map.fromList [
   where
     -- The following parses a bytestring of decimal characters. Its a bit of a hack
     -- without re-writing the decimal parser. Itll do for now.
-    parseInt u = parse (decimal <* spaces <* endOfInput) defaultEnv (u ++ " ")
+    parseInt u = parse_ (decimal <* spaces <* endOfInput) (u ++ " ")
     handleMaxStrings u = case parseInt u of
       Done _ i  -> modify $ \e -> e { maxStrPerRule = i }
       _         -> fault "option \"max-strings-per-rule\" ('M') requires an integer argument"
@@ -169,7 +183,7 @@ args = Map.fromList [
       let new = u <| onlyIdens e in e { onlyIdens = new }
     handleTag u = when_ (checkIfIdentifier u) badIdenChars $ modify $ \e ->
       let new = u <| onlyTags e in e { onlyTags = new }
-    handleExternalVar u v = case parse value defaultEnv v of
+    handleExternalVar u v = case parse_ value v of
       Done _ i ->  when_ (checkIfIdentifier u) badIdenChars $ modify $ \e ->
                        let new = Map.insert u i (externVars e) in e { externVars = new }
       _        -> fault "option \"define\" ('d') requires integer/bool/string argument"
@@ -187,7 +201,7 @@ parseSingleFlag :: YaraParser ()
 parseSingleFlag = do
   -- Since command line arguments are stored in the parser
   -- buffer, we pull the next character
-  s <- anyWord8
+  s <- anyByte
   let msg = "option `-" +> s ++ "` requires an argument"
   case querySingleFlag s of
     Nothing             -> unknownFlag $ singleton s
@@ -195,15 +209,15 @@ parseSingleFlag = do
     Just (Arg1 _ _ par) -> do
       -- Any char flag that takes arguments must be followed
       -- by a space character seperating the arguments
-      b <- not . isSpace <$> peekWord8
+      b <- not . isSpace <$> peekByte
       -- If so, throw error, otherwise run parser.
       when_ b msg $ par =<< getArg
     Just (Arg2 _ _ _ par) -> do
       -- Identical to Arg1 handling
-      b <- not . isSpace <$> peekWord8
+      b <- not . isSpace <$> peekByte
       when_ b msg $ join $ liftA2 par getArg getArg
   where
-    querySingleFlag :: Word8 -> Maybe ArgN
+    querySingleFlag :: Byte -> Maybe ArgN
     querySingleFlag w = Map.lookup w $ Map.mapKeysMonotonic fst args
 
 -- | Parse a double flag
@@ -227,21 +241,26 @@ parseDoubleFlag bs =
 parseArgs_ :: YaraParser Env
 parseArgs_ = do
   w <- getArg
-  if | isPrefixOf "--" w  && B.length w > 2  -> parseDoubleFlag w *> parseArgs_
-     | isPrefixOf "-"  w  && B.length w > 1  -> parseSingleFlag *> parseArgs_
-     | otherwise                           -> undefined
+  if | argIsLong w   -> parseDoubleFlag w *> parseArgs_
+     | argIsShort w  -> parseSingleFlag *> parseArgs_
+     | otherwise     -> undefined
+     where argIsLong w = isPrefixOf "--" w && B.length w > 2
+           argIsShort w = isPrefixOf "-" w && B.length w > 1
 
 -- | parseArgs initiates the buffer
 parseArgs :: [ByteString] -> Result Env
-parseArgs bs = parse parseArgs_ defaultEnv $ unwords bs
+parseArgs bs = parse_ parseArgs_ $ unwords bs
 
 
 
 
 
 
-
-
+data OPT = 
+    OPT_STRING_MULTI Byte ByteString [ByteString] ([ByteString] -> Parser ())
+  | OPT_STRING       Byte ByteString  ByteString  ( ByteString  -> Parser ())
+  | OPT_INTEGER      Byte ByteString  ByteString  ( ByteString  -> Parser ())
+  | OPT_BOOL         Byte ByteString                              (Parser ())
 
 
 

@@ -1,30 +1,48 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE CPP #-}
+-- |
+-- Module      :  Yara.Parsers.Utilities
+-- Copyright   :  David Heras 2018-2019
+-- License     :  GPL-3
+--
+-- Maintainer  :  dheras@protonmail.com
+-- Stability   :  experimental
+-- Portability :  unknown
+--
+-- To annotate.
+--
 module Utilities (
-    onWindows
-  , (++)
-  , (<+)
-  , (+>)
-  , putErr
-  , liftA2
-  , concatReverse
-  , ($>) -- Re-exporting
+    putErr, liftA2, concatReverse,
+
+    -- System check
+    onWindows,
+
+    -- ByteString operators
+    (++), (<+), (+>),
+
+    -- Re-exporting
+    ($>), (<|>), asum
   ) where
 
 import Prelude hiding ((++))
+import Control.Applicative ((<|>))
 import Data.ByteString
+import Data.Foldable (asum)
 import Data.Functor
-import Data.Word
 import qualified Data.List
 import System.IO (stderr)
-
-instance Semigroup Bool where
-  (<>) = (||)
+    -----
+import Types
 
 infixl 5 ++
 infixr 5 <+
 infixl 5 +>
+
+-- | @<> = ||@. Simplifies writing bool checks:
+-- (\b -> b == 10 || b == 20 || b == 30)  <=>  (==10) <> (==20) <> (==30)
+instance Semigroup Bool where
+  (<>) = (||)
 
 onWindows :: Bool
 #if defined(mingw32_HOST_OS) || defined(__MINGW32__)
@@ -40,12 +58,12 @@ onWindows = False
 {-# INLINE (++) #-}
 
 -- | Operator for `cons`
-(<+) :: Word8 -> ByteString -> ByteString
+(<+) :: Byte -> ByteString -> ByteString
 (<+) = cons
 {-# INLINE (<+) #-}
 
 -- | Operator for `snoc`
-(+>) :: ByteString -> Word8 -> ByteString
+(+>) :: ByteString -> Byte -> ByteString
 (+>) = snoc
 {-# INLINE (+>) #-}
 
@@ -67,3 +85,9 @@ concatReverse :: Monoid m => [m] -> m
 concatReverse [x] = x
 concatReverse xs  = mconcat (Data.List.reverse xs)
 {-# INLINE concatReverse #-}
+
+
+{--
+concatReverse ["david"] = "david"
+concatReverse ["david","jeras","maggie"] = "maggeherasdavid"
+-}
