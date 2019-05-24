@@ -28,6 +28,7 @@ module Text.Yara.Shared (
 
     -- UnconsN series
     uncons2, uncons3, uncons4, uncons5
+
   ) where
 
 import Prelude hiding ((++), FilePath)
@@ -41,6 +42,11 @@ import Data.Foldable (asum)
 import Data.Functor
 import Data.Word
 import Foreign hiding (void)
+
+import qualified Data.List       as List
+import qualified Data.Map.Strict as Map
+import qualified Data.Set        as Set
+import qualified Data.Sequence   as Seq
 
 infixl 5 ++
 infixr 5 <+

@@ -26,7 +26,7 @@ module Text.Yara.Parsing.Parser (
 
     -- Running the parsers
     (<?>), (<!>), parse, parse_, advance, prompt,
-    getPos, posMap, getPosByteString
+    getPos, posMap, getPosByteString, forkA, when_
     ) where
 
 import Prelude hiding (FilePath, length, drop, (++), null)
@@ -43,9 +43,9 @@ import qualified Data.ByteString.Lazy as BL (toStrict)
 import Data.Default
 import Data.String ()
 import Data.Typeable
-    -----
 import qualified Data.List       as List
 import qualified Data.Map.Strict as Map
+import qualified Data.Set        as Set
 import qualified Data.Sequence   as Seq
     -----
 import Text.Yara.Parsing.Buffer
@@ -195,6 +195,7 @@ instance Monoid a => Monoid (YaraParser a) where
   {-# INLINE mappend #-}
 
 -- | Version of 'fail' that uses bytestrings instead
+-- It also appends the current position to the begining of the message.
 fault :: ByteString -> YaraParser a
 fault m = do
   p <- getPosByteString
@@ -308,12 +309,38 @@ prompt l s b e = Partial $ \bs -> if null bs
   else s (bufferPappend b bs) (e { moreInput = Incomplete })
 {-# INLINE prompt #-}
 
+-- | @forkParsing@
+-- Basically, written as a monadic if-then-else but with the order reverses
+-- since a false case is usually a simple return and a True case is a continue
+-- parsing.
+--
+-- Think of it as "if need byte is this, go left (or done), else go right and
+-- continue."
+forkA :: Applicative f
+      => Bool
+      -> f a     -- ^ If False, execute this action
+      -> f a     -- ^ If True, execute this action
+      -> f a
+forkA b u v = if b then v else u
+{-# INLINE forkA #-}
+{-# SPECIALIZE forkA :: Bool -> YaraParser a -> YaraParser a -> YaraParser a #-}
+
+-- | A version of 'when' that returns failure if predicate is False.
+when_ :: Bool
+      -> ByteString
+      -- ^ If false, return failure with this bytestring
+      -> YaraParser a
+      -- ^ Otherwise, run parser
+      -> YaraParser a
+when_ b p q = if b then q else fault p
+{-# INLINE when_ #-}
+
 -- | To annotate
 data Env = Env {
     position         :: !Pos
   , moreInput        :: !More
   , sourceFiles      :: !(Map.Map Label FilePath)
-  , moduleImports    :: !(Map.Map Label FilePath)
+  , moduleImports    :: !(Set.Set ByteString)
   , targetFile       :: !FilePath
   , externVars       :: !(Map.Map Label Value)
   , moduleData       :: !(Map.Map Label FilePath)
@@ -349,7 +376,7 @@ instance Show Env where
       ["pos", show position]
     , ["more", show moreInput]
     , ["source files" , show sourceFiles]
-    , ["rules", show  moduleImports]
+    , ["moduleImports", show moduleImports]
     , ["target", show targetFile]
     , ["externVars", show externVars]
     , ["moduleData", show moduleData]
@@ -385,7 +412,7 @@ instance Default Env where
       position = 0
     , moreInput = Incomplete
     , sourceFiles = Map.empty
-    , moduleImports = Map.empty
+    , moduleImports = Set.empty
     , targetFile = ""
     , externVars = Map.empty
     , moduleData = Map.empty

@@ -26,6 +26,7 @@ import Prelude hiding ((++), takeWhile, unlines, quot, sequence, null,
 import Data.ByteString hiding (foldl1, foldl, foldr1, putStrLn,
                                zip, map, replicate, takeWhile, empty,
                                elem, count, tail, unpack, pack)
+import Control.Monad.Reader
 import Data.Default
 import Text.Regex.Posix.Wrap
 import Text.Regex.Posix ()
@@ -37,14 +38,15 @@ import qualified Data.Set        as Set
 import Text.Yara.Parsing.Combinators
 import Text.Yara.Parsing.Parser
 import Text.Yara.Parsing.Types
---import Text.Yara.Parsers.Hash
+import Text.Yara.Parsing.Hash
 import Text.Yara.Shared
 
 
+badModule i = fault $ "'" ++ i ++ "' is not an imported module"
 
 --data ConditionOperator a =
   --MkHash :: Hash -> ConditionOperator Hash
- -- MkFile :: 
+ -- MkFile ::
 bool :: YaraParser Bool
 bool = (string "false" $> False)
    <|> (string "true" $> True)
@@ -92,7 +94,7 @@ isIdByte      = isAlphaNum <> isUnderscore
 --
 -- We additionally imposed that identifiers cannot be a single number or
 -- just an underscore for the time being, due to parsing issues.
-identifier :: YaraParser Identifier
+identifier :: YaraParser ByteString
 identifier = do
   -- must start with underscore or letter
   w <- satisfy isLeadingByte
@@ -102,7 +104,7 @@ identifier = do
      -- Simply an underscore or digit is not an acceptable identifier
      | null r && not (isAlpha w) -> fault $ "Unacceptable identifier: " +> w
      -- Otherwise, we have an acceptable identifier
-     | otherwise -> pure i
+     | otherwise   -> pure i
   <?> "identifier"
   where -- Read only upto 128 bytes (127 plus leading byte)
     p :: Int -> Byte -> Maybe Int
@@ -110,6 +112,21 @@ identifier = do
           | isIdByte w         = Just $ n + 1
           | otherwise          = Nothing
 {-# INLINE identifier #-}
+
+identifier_ :: YaraParser Identifier
+identifier_ = do
+  i <- identifier
+  b <- isDot <$> peekByte
+  -- If the next byte is a dot, may be trying to import a module.
+  -- Parse another identifier and check if it was imported
+  forkA b (pure i) $ do
+    -- Ensure that possible module is an imported one.
+    m <- reader moduleImports
+    if Set.member i m
+       then dot *> identifier
+       else badModule i
+  <?> "identifier_"
+{-# INLINE identifier_ #-}
 
 checkIfIdentifier :: ByteString -> Bool
 checkIfIdentifier bs = case uncons bs of

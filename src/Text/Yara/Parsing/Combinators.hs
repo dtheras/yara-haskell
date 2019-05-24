@@ -26,7 +26,7 @@ module Text.Yara.Parsing.Combinators (
   pair, parse, atEnd, endOfBuffer, endOfInput, decimal, hexadecimal,
 
   -- Parser Predicates
-  isAlpha, isDigit, isAlphaNum, isSpace, isEndOfLine, isHorizontalSpace,
+  isAlpha, isDigit, isAlphaNum, isSpace, isEndOfLine, isHorizontalSpace, isDot,
 
   -- Fundamental Parsers
   peekByte, satisfy, anyByte, skipWhile, takeTill, takeWhile, takeWhile1,
@@ -34,7 +34,7 @@ module Text.Yara.Parsing.Combinators (
 
   -- Specific character parsers
   openCurl, closeCurl, openParen, closeParen, bSlash, fSlash, tab, vertBar,
-  dash, colon, equal, at, lt, gt, quote,
+  dash, colon, equal, at, lt, gt, quote, dot, doubleEqual,
 
   option, perhaps, many, many1, manyTill, skipTo, skipMany, skipMany1, count,
 
@@ -254,6 +254,10 @@ equal :: YaraParser Byte
 equal = byte 61
 {-# INLINE equal #-}
 
+doubleEqual :: YaraParser Byte
+doubleEqual = byte 61 *> byte 61
+{-# INLINE doubleEqual #-}
+
 lt :: YaraParser Byte
 lt = byte 60
 {-# INLINE lt #-}
@@ -261,6 +265,7 @@ lt = byte 60
 gt :: YaraParser Byte
 gt = byte 62
 {-# INLINE gt #-}
+
 at :: YaraParser Byte
 at = byte 64
 {-# INLINE at #-}
@@ -269,10 +274,18 @@ quote :: YaraParser Byte
 quote = byte 34
 {-# INLINE quote #-}
 
+dot :: YaraParser Byte
+dot = byte 46
+{-# INLINE dot #-}
 
 -- FAST PREDICATES
 
+isDot :: Byte -> Bool
+isDot = (==46)
+{-# INLINE isDot #-}
+
 isAlpha :: Byte -> Bool
+
 isAlpha b = b - 65 < 26 || b - 97 < 26
 {-# INLINE isAlpha #-}
 
@@ -319,9 +332,7 @@ peekByte = YaraParser $ \b e l s ->
 satisfy :: (Byte -> Bool) -> YaraParser Byte
 satisfy p = do
   h <- peekByte
-  if p h
-    then advance 1 >> pure h
-    else fault "satisfy"
+  when_ (p h) "satisfy" $ advance 1 >> pure h
 {-# INLINE satisfy #-}
 
 -- | Match a specific byte.
@@ -404,9 +415,7 @@ decimal = foldl' step 0 `fmap` takeWhile1 isDigit
 skip :: (Byte -> Bool) -> YaraParser ()
 skip p = do
   h <- peekByte
-  if p h
-    then advance 1
-    else fail "skip"
+  forkA (p h) (fail "skip") (advance 1)
 
 -- | skipTo
 -- Gobbles up horizontal space then applies parser
@@ -470,9 +479,8 @@ takeWhile :: (Byte -> Bool) -> YaraParser ByteString
 takeWhile p = do
     s <- BS.takeWhile p <$> getBuff
     continue <- atleastBytesLeft (length s)
-    if continue
-      then takeWhileAcc p s
-      else pure s
+    forkA continue (pure s) $ takeWhileAcc p s
+
 {-# INLINE takeWhile #-}
 
 takeWhile1 :: (Byte -> Bool) -> YaraParser ByteString
@@ -480,9 +488,7 @@ takeWhile1 p = do
   (`when` void demandInput) =<< endOfBuffer
   s <- BS.takeWhile p <$> getBuff
   let len = length s
-  if len == 0
-    then fail "takeWhile1"
-    else do
+  when_ (len /= 0) "takeWhile1" $ do
       advance len
       eoc <- endOfBuffer
       if eoc

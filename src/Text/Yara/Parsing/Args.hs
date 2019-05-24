@@ -10,7 +10,7 @@
 -- Portability :  unknown
 --
 -- Parse and handle command line arguments
--- 
+--
 module Text.Yara.Parsing.Args (
     parseArgs  --  :: [ByteString] -> Result Env
   , showHelp   --  :: ByteString
@@ -71,16 +71,6 @@ filepath = filepathQuoted <|> filepathUnquoted
 -}
 
 
-
--- | A version of 'when' that returns failure if predicate is False.
-when_ :: Bool
-      -> ByteString
-      -- ^ If false, return failure with this bytestring
-      -> YaraParser a
-      -- ^ Otherwise, run parser
-      -> YaraParser a
-when_ b p q = if b then q else fault p
-{-# INLINE when_ #-}
 
 -- Return the next command line argument.
 getArg :: YaraParser ByteString
