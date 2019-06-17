@@ -1,6 +1,6 @@
 {-# LANGUAGE PatternGuards #-}
 -- |
--- Module      :  Text.Yara.Parsing.Glob
+-- Module      :  Yara.Parsing.Glob
 -- Copyright   :  David Heras 2018-2019
 -- License     :  GPL-3
 --
@@ -26,14 +26,14 @@
 --
 -- The design of the library is modeled after System.FilePath.Glob, however
 -- tailored to our needs by using ByteStrings natively and removing superfluous -- (for us) monad transforms support.
-module Text.Yara.Parsing.Glob where
+module Yara.Parsing.Glob where
 
 import Prelude hiding (FilePath, (++), null, head)
 import Data.ByteString hiding (elem)
 import Text.Regex.Posix ((=~~))
 import qualified Data.Sequence as Seq
     -----
-import Text.Yara.Shared
+import Yara.Shared
 
 glob :: ByteString -> IO (Seq.Seq FilePath)
 glob = undefined -- =~~ undefined

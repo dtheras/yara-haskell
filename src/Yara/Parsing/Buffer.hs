@@ -1,7 +1,7 @@
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 {-# LANGUAGE BangPatterns #-}
 -- |
--- Module      :  Text.Yara.Parsing.Buffer
+-- Module      :  Yara.Parsing.Buffer
 -- Copyright   :  David Heras 2018-2019
 -- License     :  GPL-3
 --
@@ -12,7 +12,7 @@
 -- A buffer holds the bytestring currently being parsed in a fast
 -- (for our parsing operations) structure.
 --
-module Text.Yara.Parsing.Buffer (
+module Yara.Parsing.Buffer (
   Pos, Buffer(..),
   toBuffer, bufferLength, bufferLengthAtLeast,
   bufferPappend, bufferAppend, bufferUnsafeIndex,
@@ -30,7 +30,7 @@ import Foreign.Ptr
 import Foreign.Storable
 import GHC.ForeignPtr
     -----
-import Text.Yara.Shared
+import Yara.Shared
 
 type Pos = Int
 

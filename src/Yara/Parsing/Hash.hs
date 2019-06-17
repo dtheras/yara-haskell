@@ -16,7 +16,7 @@
 --                     users_guide/glasgow_exts.html#package-qualified-imports
 {-# LANGUAGE PackageImports #-}
 -- |
--- Module      :  Text.Yara.Parsing.Hash
+-- Module      :  Yara.Parsing.Hash
 -- Copyright   :  David Heras 2018-2019
 -- License     :  GPL-3
 --
@@ -38,7 +38,7 @@
 --       The first is a file offset and second is length of portion of
 --       file.
 --
-module Text.Yara.Parsing.Hash ( parseHash ) where
+module Yara.Parsing.Hash ( parseHash ) where
 
 import Control.Monad.IO.Class
 import Control.Applicative
@@ -50,10 +50,10 @@ import Data.ByteArray.Encoding
 import Data.ByteArray hiding (null)
 import Data.Int
     -----
-import Text.Yara.Shared
-import Text.Yara.Parsing.Types
-import Text.Yara.Parsing.Parser
-import Text.Yara.Parsing.Combinators
+import Yara.Shared
+import Yara.Parsing.Types
+import Yara.Parsing.Parser
+import Yara.Parsing.Combinators
 
 -- | Store results of parsing hash in yara rule.
 --

@@ -1,7 +1,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings #-}
 -- |
--- Module      :  Text.Yara.Parsing.Types
+-- Module      :  Yara.Parsing.Types
 -- Copyright   :  David Heras 2018-2019
 -- License     :  GPL-3
 --
@@ -11,7 +11,7 @@
 --
 -- To annotate.
 --
-module Text.Yara.Parsing.Types where
+module Yara.Parsing.Types where
 
 import Data.ByteString
     -----

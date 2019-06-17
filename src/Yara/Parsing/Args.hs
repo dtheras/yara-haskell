@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
 -- |
--- Module      :  Text.Yara.Parsing.Args
+-- Module      :  Yara.Parsing.Args
 -- Copyright   :  David Heras 2018-2019
 -- License     :  GPL-3
 --
@@ -11,7 +11,7 @@
 --
 -- Parse and handle command line arguments
 --
-module Text.Yara.Parsing.Args (
+module Yara.Parsing.Args (
     parseArgs  --  :: [ByteString] -> Result Env
   , showHelp   --  :: ByteString
   ) where

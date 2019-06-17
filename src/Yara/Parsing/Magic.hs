@@ -9,15 +9,15 @@
 --
 -- "The Magic module allows you to identify the type of the file based on the
 --  output of 'file', the standard Unix command.""
-module Text.Yara.Parsing.Magic (
+module Yara.Parsing.Magic (
   --  magicType, magicMimeType
   ) where
 
 import Prelude hiding ((++))
 import Data.ByteString
     ----
-import Text.Yara.Shared (onWindows, (++))
-import Text.Yara.Parsing.Parser
+import Yara.Shared (onWindows, (++))
+import Yara.Parsing.Parser
 {-
 type FileTest = L.ByteString -> IO Bool
 

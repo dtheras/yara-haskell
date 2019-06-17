@@ -10,7 +10,7 @@
 {-# ANN module "HLint: ignore Eta reduce" #-}
 #endif
 -- |
--- Module      :  Text.Yara.Parsing.Combinators
+-- Module      :  Yara.Parsing.Combinators
 -- Copyright   :  David Heras 2018-2019
 -- License     :  GPL-3
 --
@@ -20,7 +20,7 @@
 --
 -- A library of useful, general parser combinators.
 --
-module Text.Yara.Parsing.Combinators (
+module Yara.Parsing.Combinators (
 
   -- Parser combinators
   pair, parse, atEnd, endOfBuffer, endOfInput, decimal, hexadecimal,
@@ -34,7 +34,7 @@ module Text.Yara.Parsing.Combinators (
 
   -- Specific character parsers
   openCurl, closeCurl, openParen, closeParen, bSlash, fSlash, tab, vertBar,
-  dash, colon, equal, at, lt, gt, quote, dot, doubleEqual,
+  dash, colon, equal, at, lt, gt, quote, dot, doubleEqual, ellipsis,
 
   option, perhaps, many, many1, manyTill, skipTo, skipMany, skipMany1, count,
 
@@ -69,9 +69,9 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Sequence   as Seq
 import qualified Data.Set        as Set
     -----
-import Text.Yara.Parsing.Buffer
-import Text.Yara.Parsing.Parser
-import Text.Yara.Shared
+import Yara.Parsing.Buffer
+import Yara.Parsing.Parser
+import Yara.Shared
 
 instance (a ~ ByteString) => IsString (YaraParser a) where
     fromString = string . C8.pack
@@ -278,6 +278,10 @@ dot :: YaraParser Byte
 dot = byte 46
 {-# INLINE dot #-}
 
+ellipsis :: YaraParser ()
+ellipsis = void $ dot *> dot
+{-# INLINE ellipsis #-}
+
 -- FAST PREDICATES
 
 isDot :: Byte -> Bool
@@ -332,7 +336,7 @@ peekByte = YaraParser $ \b e l s ->
 satisfy :: (Byte -> Bool) -> YaraParser Byte
 satisfy p = do
   h <- peekByte
-  when_ (p h) "satisfy" $ advance 1 >> pure h
+  when_ (p h) "satisfy" (advance 1 >> pure h)
 {-# INLINE satisfy #-}
 
 -- | Match a specific byte.
@@ -415,7 +419,8 @@ decimal = foldl' step 0 `fmap` takeWhile1 isDigit
 skip :: (Byte -> Bool) -> YaraParser ()
 skip p = do
   h <- peekByte
-  forkA (p h) (fail "skip") (advance 1)
+  forkA (p h) (pure ()) $
+    advance 1
 
 -- | skipTo
 -- Gobbles up horizontal space then applies parser
@@ -516,7 +521,7 @@ between :: YaraParser o
 between op cp p = op *> skipTo p <* skipTo cp
 {-# INLINE between #-}
 
--- | A generic "grouping" parser that take any parser. So,
+-- A generic "grouping" parser that take any parser. So,
 --      /parse (grouping alphaNums) "(abc|def|ghi|jkl)"
 --                                = Done "fromList[abc,def,ghi,jkl]" ""/
 --
@@ -524,9 +529,15 @@ between op cp p = op *> skipTo p <* skipTo cp
 --       seperators.
 --
 -- Note: the parser must succeed atleast once (so "(p)" will pass but not "()").
-grouping :: YaraParser a -> YaraParser [a]
-grouping p = between openParen closeParen $ interleaved vertBar p
+
+
+grouping :: YaraParser a -> YaraParser s -> YaraParser (Seq.Seq a)
+grouping p v = between openParen closeParen $ interleaved v p
   where interleaved s par = sepBy1 par (skipTo s <* spaces)
+
+
+
+
 {-
 -- | `quotedString` parses a string literal
 -- Strings can contain the following escape bytes \" \\ \t \n \r and handle
@@ -632,7 +643,7 @@ ensureSuspended n = runParser (demandInput >> go)
             else runParser (demandInput >> go) b e l s
 {-# INLINE ensureSuspended #-}
 
--- | Immediately demand more input via a 'Partial' continuation
+-- | Immedidately demand more input via a 'Partial' continuation
 -- result.
 demandInput :: YaraParser ByteString
 demandInput = YaraParser $ \b e l s ->

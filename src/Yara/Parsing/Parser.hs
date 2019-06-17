@@ -7,7 +7,7 @@
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 {-# OPTIONS_HADDOCK prune #-}
 -- |
--- Module      :  Text.Yara.Parsing.Parser
+-- Module      :  Yara.Parsing.Parser
 -- Copyright   :  David Heras 2018-2019
 -- License     :  GPL-3
 --
@@ -17,7 +17,7 @@
 --
 -- Fundamental YARA parser/data types and based on the Attoparsec library.
 --
-module Text.Yara.Parsing.Parser (
+module Yara.Parsing.Parser (
     -- Parser types
     YaraParser(..), Result(..), More(..), Failure, Success, Env(..),
 
@@ -48,9 +48,9 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set        as Set
 import qualified Data.Sequence   as Seq
     -----
-import Text.Yara.Parsing.Buffer
-import Text.Yara.Parsing.Types
-import Text.Yara.Shared
+import Yara.Parsing.Buffer
+import Yara.Parsing.Types
+import Yara.Shared
 
 -- GENERAL TYPE & INSTANCES
 
@@ -85,23 +85,32 @@ instance (NFData r) => NFData (Result r) where
 
 -- | To annotate
 data Env = Env {
-     position   :: !Pos
+     position     :: !Pos
   -- ^ Position in buffer.
-  ,  more       :: !More
+  ,  more         :: !More
   -- ^ More input available?
-  ,  imports    :: !(Set.Set ByteString)
+  ,  imports      :: !(Set.Set ByteString)
   -- ^ Collection of imported modules
   ,  externalVars :: !(Map.Map Label Value)
   -- ^ Set of externally defined variables
+  ,  localStrings :: !(Map.Map ByteString ByteString)
+  -- ^
+  ,  filesize     :: !Word64
+  -- ^
+  ,  filename     :: ByteString
+  ,  filetype     :: ByteString
   } deriving (Show, Eq)
 
 -- | A default set of environmental variables.
 instance Default Env where
   def = Env {
-    position = 0
+      position = 0
     , more = Incomplete
     , imports = Set.empty
     , externalVars = Map.empty
+    , localStrings = Map.empty
+    , filename = ""
+    , filetype = ""
     }
 
 -- | More input avialable?
@@ -120,34 +129,34 @@ type Success a r = Buffer -> Env -> a -> Result r
 -- The type of string parsed is always a bytestring (treated as a stream of bytes).
 -- This type is an instance of the following classes:
 --
--- * 'Functor' and 'Applicative', which follow the usual definitions.
+--  o  'Functor' and 'Applicative', which follow the usual definitions.
 --
--- * 'Monad', where 'fail' throws an exception (i.e. fails) with an
---   error message. We also provide 'fault', which is used in place of
---   'fail' as it accepts bytestrings.
+--  o  'Monad', where 'fail' throws an exception (i.e. fails) with an
+--     error message. We also provide 'fault', which is used in place of
+--     'fail' as it accepts bytestrings.
 --
--- * 'MonadPlus', where 'mzero' fails (with no error message) and
---   'mplus' executes the right-hand parser if the left-hand one
---   fails.  When the parser on the right executes, the input is reset
---   to the same state as the parser on the left started with. (In
---   other words, attoparsec is a backtracking parser that supports
---   arbitrary lookahead.)
+--  o  'MonadPlus', where 'mzero' fails (with no error message) and
+--     'mplus' executes the right-hand parser if the left-hand one
+--     fails.  When the parser on the right executes, the input is reset
+--     to the same state as the parser on the left started with. (In
+--     other words, attoparsec is a backtracking parser that supports
+--     arbitrary lookahead.)
 --
--- * 'Alternative', which follows 'MonadPlus'.
+--  o  'Alternative', which follows 'MonadPlus'.
 --
--- * 'Default', where 'def := pure ()'
+--  o  'Default', where 'def := pure ()'
 --
--- * 'Semigroup', 'Monoid' To annotate.
+--  o  'Semigroup', 'Monoid' To annotate.
 --
--- * 'MonadReader' and 'MonadState', where our parser deviates significantly from
---   the 'Data.Attoparsec' core parser, upon which this implimentations is derived
---   from. The parser has access to an 'Env' (short for 'Environment') record that
---   tracks the position and if more input is avialable (identical to how
---   Attoparsec uses these parameters) but also provides access to necessary
---   environmental variables such as known imports, name space, global rules,
---   external variables, ect.
+--  o  'MonadReader' and 'MonadState', where our parser deviates significantly
+--     from the 'Data.Attoparsec' core parser, upon which this implimentations
+--     is derived from. The parser has access to an 'Env' (short for
+--     'Environment') record that tracks the position and if more input is
+--     avialable (identical to how Attoparsec uses these parameters) but also
+--     provides access to necessary environmental variables such as known
+--     imports, name space, global rules, external variables, ect.
 --
---   This is a current compromise/test.
+-- This is a current compromise/test.
 --
 newtype YaraParser a = YaraParser {
     runParser ::
@@ -245,12 +254,35 @@ instance MonadReader Env YaraParser where
 instance Default a => Default (YaraParser a) where
   def = pure def
 
+
 --- RUNNING A PARSER
+
 
 -- | Return current position.
 getPos :: YaraParser Int
 getPos = reader position
 {-# INLINE getPos #-}
+
+
+getStrings :: YaraParser (Set.Set ByteString ByteString)
+getStrings = reader localStrings
+{-# INLINE getStrings #-}
+
+
+getFilesize :: YaraParser Word64
+getFilesize = reader filesize
+{-# INLINE getFilesize #-}
+
+
+getFilename :: YaraParser ByteString
+getFilename = reader filename
+{-# INLINE getFilename #-}
+
+
+getFiletype :: YaraParser ByteString
+getFiletype = reader filetype
+{-# INLINE getFiletype #-}
+
 
 -- | 'Read' current position as a ByteString.
 -- Used for returning location in printable format.

@@ -10,13 +10,13 @@
 --
 -- To annotate.
 --
-module Text.Yara.Parsing.Elf where
+module Yara.Parsing.Elf where
 
 import Prelude hiding (FilePath)
 import Data.ByteString.Char8 (unpack)
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString as S
-import Text.Yara.Shared
+import Yara.Shared
 
 elfMagic :: S.ByteString
 elfMagic = "\DELELF"
