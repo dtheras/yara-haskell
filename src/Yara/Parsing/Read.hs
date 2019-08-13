@@ -30,7 +30,7 @@ import Utilities
 
 
 
--- | Convert our 'YaraParser' to a @pipes-parse@
+-- | Convert our 'YP' to a @pipes-parse@
 -- 'Pipes.Parser'.
 --
 -- This 'Pipes.Parser' is compatible with the tools from "Pipes.Parse".

@@ -41,12 +41,12 @@ badFilepathByte w = not $ if onWindows
   else w - 33 <= 58 || w - 93 <= 33
 {-# INLINE badFilepathByte #-}
 {-
-filepathQuoted :: YaraParser ByteString
+filepathQuoted :: YP ByteString
 filepathQuoted = quotedStringWith badFilepathByte
       | w == 42 && not b   = Just True  -- if escaped wildcard, keep going
 {-# INLINE filepathQuoted #-}
 -}
-filepathUnquoted :: YaraParser ByteString
+filepathUnquoted :: YP ByteString
 filepathUnquoted = do
   fp <- scan False $ \b w -> if
       | badFilepathByte w  -> Nothing    -- if not fp char, done
@@ -65,7 +65,7 @@ filepathUnquoted = do
 -- | `filepath` parses filepath passed into the command line, either style
 --  quoted style:    $ prog --flag="some/random filepath"
 --  unquoted style:  $ prog --flag=some/random\ filepath
-filepath :: YaraParser ByteString
+filepath :: YP ByteString
 filepath = filepathQuoted <|> filepathUnquoted
 {-# INLINE filepath #-}
 -}
@@ -73,7 +73,7 @@ filepath = filepathQuoted <|> filepathUnquoted
 
 
 -- Return the next command line argument.
-getArg :: YaraParser ByteString
+getArg :: YP ByteString
 getArg = do
   spaces
   arg <- scan False p
@@ -107,9 +107,9 @@ showArgs = Map.foldlWithKey go "" args
                   (Arg2 h l m _) -> ("--" ++ d ++ "=" ++ l ++ "=" ++ m, h)
 {-# INLINE showArgs #-}
 
-data ArgN = Arg0 ByteString             (YaraParser ())
-          | Arg1 ByteString Label       (ByteString -> YaraParser ())
-          | Arg2 ByteString Label Label (ByteString -> ByteString -> YaraParser ())
+data ArgN = Arg0 ByteString             (YP ())
+          | Arg1 ByteString Label       (ByteString -> YP ())
+          | Arg2 ByteString Label Label (ByteString -> ByteString -> YP ())
 
 -- Helps reability by avoiding (visible) tuple nesting
 (=?) :: a -> b -> (a,b)
@@ -181,12 +181,12 @@ args = Map.fromList [
     badIdenChars :: ByteString
     badIdenChars = "yara: indentifier contains exlcuded chars"
 
-unknownFlag :: ByteString -> YaraParser a
+unknownFlag :: ByteString -> YP a
 unknownFlag bs = fault $ "unknown option '" ++ bs ++ "'"
 {-# INLINE unknownFlag #-}
 
 -- | Parse a single flag.
-parseSingleFlag :: YaraParser ()
+parseSingleFlag :: YP ()
 parseSingleFlag = do
   -- Since command line arguments are stored in the parser
   -- buffer, we pull the next character
@@ -211,7 +211,7 @@ parseSingleFlag = do
 
 -- | Parse a double flag
 -- The line argument is passed in with the "--" already stripped
-parseDoubleFlag :: ByteString -> YaraParser ()
+parseDoubleFlag :: ByteString -> YP ()
 parseDoubleFlag bs =
   let (_,bs') = splitAt 2 bs
       (h:hs) = split 61 bs'
@@ -227,7 +227,7 @@ parseDoubleFlag bs =
     queryDoubleFlag w = Map.lookup w $ Map.mapKeysMonotonic snd args
 
 -- | parseArgs_ actually handles the command line arguments
-parseArgs_ :: YaraParser Env
+parseArgs_ :: YP Env
 parseArgs_ = do
   w <- getArg
   if | argIsLong w   -> parseDoubleFlag w *> parseArgs_
@@ -259,7 +259,7 @@ data OPT =
 -- Parse an unquoted-style filepath passed into the command line
 -- No size limit is imposed.
 -- Loaded with errors.
-filepath :: YaraParser ByteString
+filepath :: YP ByteString
 filepath = go ""
   where
     go acc = do
@@ -297,7 +297,7 @@ filepath = go ""
 --    span' bs = mapSnd (drop 1) $ span (/= bs)
 --               where mapSnd f (x,y) = (x, f y)
 
---  splitAtEqs :: YaraParser [ByteString]
+--  splitAtEqs :: YP [ByteString]
 --  splitAtEqs bs = parse (sepBy1 (word8 61) (takeWhile (/=61))) defaultEnv bs
 
 

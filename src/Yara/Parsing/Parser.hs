@@ -4,6 +4,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE CPP#-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 {-# OPTIONS_HADDOCK prune #-}
 -- |
@@ -19,14 +20,18 @@
 --
 module Yara.Parsing.Parser (
     -- Parser types
-    YaraParser(..), Result(..), More(..), Failure, Success, Env(..),
+    YP(..), Result(..), More(..), Failure, Success, Env(..),
 
     -- Reporting errors using bytestrings (fail <~> fault)
     fault,
 
     -- Running the parsers
-    (<?>), (<!>), parse, parse_, advance, prompt,
-    getPos, posMap, getPosByteString, forkA, when_
+    (<?>), (<!>), parse, parse_, advance, prompt, posMap,
+    forkA,
+
+    getPosByteString, getPos, getStrings, getInscopeRules,
+    getFilename, getFiletype
+
     ) where
 
 import Prelude hiding (FilePath, length, drop, (++), null)
@@ -36,17 +41,13 @@ import qualified Control.Monad.Fail as Fail
 import Control.Monad.Reader
 import Control.Monad.State.Strict
 import Data.ByteString hiding (pack, map)
-import Data.ByteString.Builder (toLazyByteString, intDec)
 import Data.ByteString.Char8 hiding (cons, snoc, map)
 import Data.ByteString.Internal (ByteString(..))
-import qualified Data.ByteString.Lazy as BL (toStrict)
 import Data.Default
-import Data.String ()
+import Data.String () -- Only need typeclass imported
 import Data.Typeable
-import qualified Data.List       as List
 import qualified Data.Map.Strict as Map
 import qualified Data.Set        as Set
-import qualified Data.Sequence   as Seq
     -----
 import Yara.Parsing.Buffer
 import Yara.Parsing.Types
@@ -54,7 +55,7 @@ import Yara.Shared
 
 -- GENERAL TYPE & INSTANCES
 
--- | A result type for the YaraParser
+-- | A result type for the YP
 data Result r
       -- | Parsing failed
     = Fail ByteString [ByteString] ByteString
@@ -71,17 +72,19 @@ instance Eq r => Eq (Result r) where
 instance (Show r) => Show (Result r) where
   showsPrec d ir = showParen (d > 10) $
     case ir of
-      (Fail t stk msg) -> shows "Fail" . f t . f stk . f msg
+      (Fail t stk msg) -> shows "Fail" . toShows t . toShows stk . toShows msg
       (Partial _)      -> shows "Partial _"
-      (Done t r)       -> shows "Done" . f t . f r
-    where f :: Show a => a -> ShowS
-          f x = showChar ' ' . showsPrec 11 x
+      (Done t r)       -> shows "Done" . toShows t . toShows r
 
 instance (NFData r) => NFData (Result r) where
     rnf (Fail t stk msg) = rnf t `seq` rnf stk `seq` rnf msg
     rnf (Partial _)  = ()
     rnf (Done t r)   = rnf t `seq` rnf r
     {-# INLINE rnf #-}
+
+instance Functor Result where
+  fmap f (Done b a) = Done b $ f a
+  fmap _ r          = r
 
 -- | To annotate
 data Env = Env {
@@ -90,28 +93,29 @@ data Env = Env {
   ,  more         :: !More
   -- ^ More input available?
   ,  imports      :: !(Set.Set ByteString)
-  -- ^ Collection of imported modules
-  ,  externalVars :: !(Map.Map Label Value)
+  -- ^ Set of imported modules
+  ,  externalVars :: !(Map.Map ByteString  Value)
   -- ^ Set of externally defined variables
-  ,  localStrings :: !(Map.Map ByteString ByteString)
-  -- ^
-  ,  filesize     :: !Word64
-  -- ^
+  ,  localStrings :: !(Map.Map ByteString Pattern)
+  -- ^ Stored as a follows:
+  -- 'ByteString' stores the string name
+  -- 'Pattern' stores the string, regex or byte with the set of modifiers
+  ,  inscopeRules :: !(Set.Set ByteString)
   ,  filename     :: ByteString
   ,  filetype     :: ByteString
   } deriving (Show, Eq)
 
--- | A default set of environmental variables.
-instance Default Env where
-  def = Env {
-      position = 0
-    , more = Incomplete
-    , imports = Set.empty
-    , externalVars = Map.empty
-    , localStrings = Map.empty
-    , filename = ""
-    , filetype = ""
-    }
+defEnv :: Env
+defEnv = Env {
+    position = 0
+  , more = Incomplete
+  , imports = Set.empty
+  , externalVars = Map.empty
+  , localStrings = Map.empty
+  , inscopeRules = Set.empty
+  , filename = ""
+  , filetype = ""
+  }
 
 -- | More input avialable?
 data More = Complete | Incomplete deriving (Eq, Show)
@@ -122,7 +126,7 @@ type Failure r = Buffer -> Env -> [ByteString] -> ByteString -> Result r
 -- | To annotate
 type Success a r = Buffer -> Env -> a -> Result r
 
--- YARAPARSER TYPE & INSTANCES
+-- YP TYPE & INSTANCES
 
 -- | Main parser type
 --
@@ -158,7 +162,7 @@ type Success a r = Buffer -> Env -> a -> Result r
 --
 -- This is a current compromise/test.
 --
-newtype YaraParser a = YaraParser {
+newtype YP a = YP {
     runParser ::
        forall r. Buffer       -- ^ The bytestring currently being parsed
               -> Env          -- ^ Current enviroment during parsing
@@ -167,13 +171,12 @@ newtype YaraParser a = YaraParser {
               -> Result r     -- ^ Outcome of running the parser
     } deriving Typeable
 
-instance Functor YaraParser where
-  fmap f par = YaraParser $ \b e l s ->
-    runParser par b e l (\b_ e_ a -> s b_ e_ $ f a)
+instance Functor YP where
+  fmap f par = YP $ \b e l s -> f <$> runParser par b e l s
   {-# INLINE fmap #-}
 
-instance Applicative YaraParser where
-  pure v = YaraParser $ \b !e _ s -> s b e v
+instance Applicative YP where
+  pure v = YP $ \b !e _ s -> s b e v
   {-# INLINE pure #-}
   w <*> b = do
     !f <- w
@@ -184,22 +187,25 @@ instance Applicative YaraParser where
   x <* y = x >>= \a -> y $> a
   {-# INLINE (<*) #-}
 
-instance Alternative YaraParser where
+instance Default a => Default (YP a) where
+  def = pure def
+
+instance Alternative YP where
   empty = fail "empty"
   {-# INLINE empty #-}
   (<|>) = mplus
   {-# INLINE (<|>) #-}
   many p = many_p
-     where many_p = some_p `mplus` def
+     where many_p = some_p `mplus` pure []
            some_p = liftA2 (:) p many_p
   {-# INLINE many #-}
   some v = some_v
-     where many_v = some_v <|> def
+     where many_v = some_v <|> pure []
            some_v = liftA2 (:) v many_v
   {-# INLINE some #-}
 
-instance Monad YaraParser where
-  v >>= k = YaraParser $ \b !e l s ->
+instance Monad YP where
+  v >>= k = YP $ \b !e l s ->
     runParser v b e l (\t_ e_ a -> runParser (k a) t_ e_ l s)
   {-# INLINE (>>=) #-}
   (>>) = (*>)
@@ -207,18 +213,18 @@ instance Monad YaraParser where
   return = pure
   {-# INLINE return #-}
 
-instance MonadPlus YaraParser where
+instance MonadPlus YP where
   mzero = fault "mzero"
   {-# INLINE mzero #-}
-  mplus f g = YaraParser $ \b e l s ->
+  mplus f g = YP $ \b e l s ->
     runParser f b e (\nb _ _ _ -> runParser g nb e l s) s
   {-# INLINE mplus #-}
 
-instance Semigroup a => Semigroup (YaraParser a) where
+instance Semigroup a => Semigroup (YP a) where
   (<>) = liftA2 (<>)
   {-# INLINE (<>) #-}
 
-instance Monoid a => Monoid (YaraParser a) where
+instance Monoid a => Monoid (YP a) where
   mempty  = pure mempty
   {-# INLINE mempty #-}
   mappend = (<>)
@@ -226,86 +232,50 @@ instance Monoid a => Monoid (YaraParser a) where
 
 -- | Version of 'fail' that uses bytestrings instead
 -- It also appends the current position to the begining of the message.
-fault :: ByteString -> YaraParser a
+fault :: ByteString -> YP a
 fault m = do
   p <- getPosByteString
-  YaraParser $ \b !e l _ ->
+  YP $ \b !e l _ ->
     l b e [] $ "[" ++ p ++ "] Failed parsing! " ++ m
 {-# INLINE fault #-}
 
-instance Fail.MonadFail YaraParser where
+instance Fail.MonadFail YP where
   fail = fault . pack
   {-# INLINE fail #-}
 
-instance MonadState Env YaraParser where
-  get = YaraParser $ \b !e _ s -> s b e e
+instance MonadState Env YP where
+  get = YP $ \b !e _ s -> s b e e
   {-# INLINE get #-}
-  put e = YaraParser $ \b _ l s -> runParser def b e l s
+  put e = YP $ \b _ l s -> runParser (pure ()) b e l s
   {-# INLINE put #-}
 
-instance MonadReader Env YaraParser where
+instance MonadReader Env YP where
   ask = get
   {-# INLINE ask #-}
-  local fun par = YaraParser $ \b !e l s -> runParser par b (fun e) l s
+  local fun par = YP $ \b !e l s -> runParser par b (fun e) l s
   {-# INLINE local #-}
-  reader fun = YaraParser $ \b !e _ s -> s b e (fun e)
+  reader fun = YP $ \b !e _ s -> s b e (fun e)
   {-# INLINE reader #-}
-
-instance Default a => Default (YaraParser a) where
-  def = pure def
 
 
 --- RUNNING A PARSER
 
+#define GO(n,T,s) n :: YP (T); n = reader s; {-# INLINE n #-}
+GO(getPos,Int,position)
+GO(getStrings,Map.Map ByteString Pattern,localStrings)
+GO(getInscopeRules,Set.Set ByteString,inscopeRules)
+GO(getFilename,ByteString,filename)
+GO(getFiletype,ByteString,filetype)
+-- | 'getPosByteString' return position as a ByteString.
+-- Used for printing location within buffer.
+GO(getPosByteString,ByteString,(int2bs.position))
+#undef GO
 
--- | Return current position.
-getPos :: YaraParser Int
-getPos = reader position
-{-# INLINE getPos #-}
-
-
-getStrings :: YaraParser (Set.Set ByteString ByteString)
-getStrings = reader localStrings
-{-# INLINE getStrings #-}
-
-
-getFilesize :: YaraParser Word64
-getFilesize = reader filesize
-{-# INLINE getFilesize #-}
-
-
-getFilename :: YaraParser ByteString
-getFilename = reader filename
-{-# INLINE getFilename #-}
-
-
-getFiletype :: YaraParser ByteString
-getFiletype = reader filetype
-{-# INLINE getFiletype #-}
-
-
--- | 'Read' current position as a ByteString.
--- Used for returning location in printable format.
-getPosByteString :: YaraParser ByteString
-getPosByteString = reader (int2bs.position)
-  where
-    -- @int2bs@ converts an int to a bytestring.
-    --
-    -- @VERY SLOW@ Uses the really slow 'toStrict', but even if parsing
-    -- a 100,00 word novel, at over-estimate of 7 characters a word, leaves
-    -- us converting a number less than 850,000 into a bytestring, max.
-    -- As a computation, that would probably be utterly dwarfed by the
-    -- actual loading "War & Peace" into the buffer. First estimates in ghci
-    -- suggest this is the fastest method.
-    int2bs :: Int -> ByteString
-    int2bs =  BL.toStrict . toLazyByteString . intDec
-    {-# INLINE int2bs #-}
-{-# INLINE getPosByteString #-}
 
 -- | Name the parser, in the event failure occurs.
 infixr 0 <?>
-(<?>) :: YaraParser a -> ByteString -> YaraParser a
-par <?> msg = YaraParser $ \b e l s ->
+(<?>) :: YP a -> ByteString -> YP a
+par <?> msg = YP $ \b e l s ->
    runParser par b e (\b_ e_ s_ m_ -> l b_ e_ (msg:s_) m_) s
 {-# INLINE (<?>) #-}
 
@@ -315,8 +285,8 @@ par <?> msg = YaraParser $ \b e l s ->
 -- The idea is that imported modules can be given a label at the begining
 -- instead of rewriting the module name everytime
 infixl 0 <!>
-(<!>) :: ByteString -> YaraParser a -> YaraParser a
-msg <!> par = YaraParser $ \b e l s ->
+(<!>) :: ByteString -> YP a -> YP a
+msg <!> par = YP $ \b e l s ->
    runParser par b e (\b_ e_ s_ m_ -> l b_ e_ s_ (msg ++ m_)) s
 {-# INLINE (<!>) #-}
 
@@ -326,12 +296,12 @@ posMap f e = e { position = p } where p = f $ position e
 
 -- | Advance the position pointer. Use very /carefully/ since its unnatural
 -- in the wrong situations.
-advance :: Int -> YaraParser ()
-advance n = YaraParser $ \b e _ s -> s b (posMap (+n) e) ()
+advance :: Int -> YP ()
+advance n = YP $ \b e _ s -> s b (posMap (+n) e) ()
 {-# INLINE advance #-}
 
 -- | Run a parser.
-parse :: YaraParser a  -- ^ Parser to run
+parse :: YP a  -- ^ Parser to run
       -> Env           -- ^ Env to run with (ie starting state)
       -> ByteString    -- ^ ByteString to parse
       -> Result a
@@ -343,8 +313,8 @@ parse p env b =
 {-# INLINE parse #-}
 
 -- | Parse with default environment settings.
-parse_ :: YaraParser a -> ByteString -> Result a
-parse_ p = parse p def
+parse_ :: YP a -> ByteString -> Result a
+parse_ p = parse p defEnv
 {-# INLINE parse_ #-}
 
 -- | Ask for input.  If we receive any, pass the augmented input to a
@@ -371,14 +341,12 @@ forkA :: Applicative f
       -> f a
 forkA b u v = if b then v else u
 {-# INLINE forkA #-}
-{-# SPECIALIZE forkA :: Bool -> YaraParser a -> YaraParser a -> YaraParser a #-}
+{-# SPECIALIZE forkA :: Bool -> YP a -> YP a -> YP a #-}
 
--- | A version of 'when' that returns failure if predicate is False.
-when_ :: Bool
-      -> ByteString
-      -- ^ If false, return failure with this bytestring
-      -> YaraParser a
-      -- ^ Otherwise, run parser
-      -> YaraParser a
-when_ b p q = if b then q else fault p
-{-# INLINE when_ #-}
+
+
+
+data ParsingError
+
+failWithError :: ParsingError -> YP a
+failWithError = undefined

@@ -11,4 +11,15 @@
 - Any function used within only one function body should be placed in a '''where''' clause, unless its unreadable. Simply because a function is general. Cluttering up top level definitions is messy. 
 - Don't worry about eta reduction in places in a function if it assists readability.
 - Comments should be used at necessary toplevel functions, and ocasionally in large function bodies. Generally, no narration.
-- 
+
+
+- Function names with an prefix underscore ('_') indicate they are 'incomplete' versions of other, locally defined functions. We mean that such a function is not often directly used but needs to be written as top level function. Done for name space reasons as well as readability reasons.
+
+- Imports
+
+Unfortunately, there is still the antiquated "Prelude" to deal with.  
+-- Rule of thumb [I]: don't include an explicit import list
+--- Exception: name clash.
+---------if its in the prelude. hide it or import qualified from prelude.
+-- Rule of thumb [II]: avoid qualified imports
+That doesn't say no qualified imports. s

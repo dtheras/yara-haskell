@@ -21,10 +21,10 @@ import Yara.Parsing.Parser
 {-
 type FileTest = L.ByteString -> IO Bool
 
-magicUnsupportedMsg :: ByteString -> YaraParser a
+magicUnsupportedMsg :: ByteString -> YP a
 magicUnsupportedMsg bs = fault $ "ahhd" ++ bs
 
-magicType :: YaraParser FileTest
+magicType :: YP FileTest
 magicType bs = if onWindows
   then magicUnsupportedMsg "type_"
   else undefined
@@ -32,7 +32,7 @@ magicType bs = if onWindows
 -- | Function returning a string with the MIME type of the file.
 --
 -- Example: magic.mime_type() == “application/pdf”
-magicMimeType :: YaraParser FileTest
+magicMimeType :: YP FileTest
 magicMimeType bs = if onWindows
   then magicUnsupportedMsg "mine_type"
   else do

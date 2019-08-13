@@ -2,19 +2,21 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE  UnboxedSums #-}
--- PackageImports
+{-# LANGUAGE PackageImports #-}
+-- Note: Regarding the use of PackageImports
 --
--- After several hours of attempting to resolve ghci complaint:
---     |  Ambiguous module name ‘Crypto.Hash’:
---     |    it was found in multiple packages:
---     |    cryptohash-0.11.9 cryptonite-0.25
--- it was descovered the only (not-hackish) solution that has worked is the
--- PackageImports pragma. Another hack suggested was the used of
--- -ignore-package. However, that flag doesn't parse within a
--- {-# OPTIONS_GHC #-} in a source file.
+-- Several hours were spent attempting to resolve the ghci complaint:
+--
+--     "Ambiguous module name ‘Crypto.Hash’:
+--       it was found in multiple packages:
+--       cryptohash-0.11.9 cryptonite-0.25"
+--
+-- While the PackageImports pragma is general frowned upon, it is currently
+-- the only (not-hackish) solution that (a) has worked and (b) will easily
+-- transfer to another computer. The use of "-ignore-package" was suggested
+-- but ghc(i) cannot parse it as a {-# OPTIONS_GHC #-} in a source file.
 -- Read here: https://downloads.haskell.org/~ghc/latest/docs/html/
 --                     users_guide/glasgow_exts.html#package-qualified-imports
-{-# LANGUAGE PackageImports #-}
 -- |
 -- Module      :  Yara.Parsing.Hash
 -- Copyright   :  David Heras 2018-2019
@@ -40,18 +42,14 @@
 --
 module Yara.Parsing.Hash ( parseHash ) where
 
-import Control.Monad.IO.Class
 import Control.Applicative
 import "cryptonite" Crypto.Hash
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString as S
 import Data.Digest.Adler32 ()
-import Data.ByteArray.Encoding
 import Data.ByteArray hiding (null)
 import Data.Int
     -----
-import Yara.Shared
-import Yara.Parsing.Types
 import Yara.Parsing.Parser
 import Yara.Parsing.Combinators
 
@@ -74,24 +72,24 @@ data Hash
 data HashArgs = Int64Args !Int64 !Int64
               | StringArg S.ByteString
 
-parseHash :: YaraParser Hash
+parseHash :: YP Hash
 parseHash = flip (<?>) "parseHash" $ do
   -- Parse hash name
-  hs <- strings ["md5", "sha1", "sha256", "checksum32"] <?> noImportMsg
+  hs <- oneOfStrings ["md5", "sha1", "sha256", "checksum32"] <?> noImportMsg
   spaces
-  openParen <?> "No hash argument found! Seeking '('"
+  oParen <?> "No hash argument found! Seeking '('"
   spaces
   -- Get either a quoted string or pair of Int64 numbers
   args <- parseLiteralArg <|> parseFileArgs
             <?> "Bad hash arg: expecting literal string or pair of integers"
   spaces
-  closeParen <?> "Hash argument(s) lacked closing ')'"
+  cParen <?> "Hash argument(s) lacked closing ')'"
   --let hashAlg = case hs of
   case args of
     StringArg l -> return $ handleLiteralArg hs l
     Int64Args m n -> do
       spaces
-      equal *> equal <?> "=="
+      eqeq
       spaces
       r <- quotedString <?> "Hash: Expecting literal string"
       if S.null r
@@ -100,16 +98,16 @@ parseHash = flip (<?>) "parseHash" $ do
 
   where
 
-    parseLiteralArg :: YaraParser HashArgs
+    parseLiteralArg :: YP HashArgs
     parseLiteralArg = StringArg <$> quotedString
 
-    parseFileArgs :: YaraParser HashArgs
+    parseFileArgs :: YP HashArgs
     parseFileArgs = do
-        u <- (hexadecimal <|> decimal) :: YaraParser Int64
+        u <- (hexadecimal <|> decimal) :: YP Int64
         spaces
         comma
         spaces
-        v <- (hexadecimal <|> decimal) :: YaraParser Int64
+        v <- (hexadecimal <|> decimal) :: YP Int64
         return $ Int64Args u v
 
     quotedString = undefined
@@ -136,3 +134,4 @@ handleFileArgs :: S.ByteString
                -> S.ByteString -- ^ String to match
                -> Hash
 handleFileArgs = undefined
+

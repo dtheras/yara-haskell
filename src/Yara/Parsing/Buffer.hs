@@ -39,12 +39,15 @@ data Buffer = Buf {
     _fp  :: !(ForeignPtr Byte)  -- ^ Buffer payload
   , _off :: !Int                -- ^ Buffer offset
   , _len :: !Int                -- ^ Buffer length
-  , _cap :: !Int                -- ^
+  , _cap :: !Int                -- ^ Cap length
   , _gen :: !Int                -- ^
   }
 
 -- | To annotate
-bufferSubstring :: Int -> Int -> Buffer -> ByteString
+bufferSubstring :: Int        -- ^ Offset marker
+                -> Int        -- ^ Length of substring
+                -> Buffer     -- ^ Buffer to use
+                -> ByteString
 bufferSubstring s l (Buf fp off len _ _) =
   assert (s >= 0 && s <= len) .
   assert (l >= 0 && l <= len-s) $!

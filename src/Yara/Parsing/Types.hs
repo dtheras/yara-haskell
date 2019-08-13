@@ -1,5 +1,6 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE CPP #-}
 -- |
 -- Module      :  Yara.Parsing.Types
 -- Copyright   :  David Heras 2018-2019
@@ -13,50 +14,55 @@
 --
 module Yara.Parsing.Types where
 
+import Prelude hiding ((++))
 import Data.ByteString
+import Data.Word
     -----
 import qualified Data.Map      as Map
+import qualified Data.Sequence as Seq
 import qualified Data.Set      as Set
 
+import Yara.Shared
+
 -- CONSTANTS
+#define CO(label,val) label :: Word; label = val; {-# INLINE label #-}
+CO(maxTags,32)
+CO(maxIdentifiers,32)
+CO(maxExternalVariables,32)
+CO(maxModuleData,32)
+CO(maxQueuedFiles,64)
+#undef CO
 
-max_argsTag :: Int
-max_argsTag = 32
-
-max_argsIdentifier :: Int
-max_argsIdentifier = 32
-
-max_argsExternVar :: Int
-max_argsExternVar = 32
-
-max_argsModuleData :: Int
-max_argsModuleData = 32
-
-max_queuedFiles :: Int
-max_queuedFiles = 64
-
-
-type Identifier = ByteString
-            
-
-
-type Label = ByteString
-
-{-
-data RuleString
-  = RuleString Label ByteString                 (Seq.Seq ByteString)
-  | RuleReg    Label (ByteString -> ByteString) (Seq.Seq ByteString)
-  | RuleHex    Label HexStr                     (Seq.Seq ByteString)
--}
-data Value = ValueI Int
-           | ValueS ByteString
-           | ValueB Bool
+data Value = ValueInteger Int
+           | ValueString ByteString
+           | ValueBool Bool
            deriving (Show, Eq)
 
-type Metadata = Map.Map Identifier Value
 
-data RuleType = Normal | Global | Private | GblPrv deriving Show
+-- | Meta
+type Metadatum = Map.Map ByteString Value
 
+data Pattern = StringPattern ByteString
+             | RegexPattern ByteString
+             | HexStringPattern ByteString
+             deriving Eq
+
+instance Show Pattern where
+  showsPrec d l =
+    (showParen (d > 10)) $ case l of
+      (StringPattern bs)     -> shows "String Pattern: " . toShows bs
+      (RegexPattern bs)      -> shows "Regex Pattern: " . toShows bs
+      (HexStringPattern bs)  -> shows "Hex Pattern: " . toShows bs
+
+-- | Holds the type of
+data RuleType = Normal
+              | Global
+              | Private
+              | GblPrv
+              deriving Show
+
+-- | This instance may look really odd. Only used to greatly clear up the
+-- parsing of a rule type. It follows
 instance Semigroup RuleType where
   _       <> GblPrv   = GblPrv
   GblPrv  <> _        = GblPrv
@@ -67,25 +73,63 @@ instance Semigroup RuleType where
   Normal  <> m        = m
   n       <> Normal   = n
 
+-- |
+type Patterns = Map.Map ByteString (Pattern , Set.Set ByteString)
+
+-- |
+--
+data ConditionalExp
+  = Boolean Bool
+  -- ^
+  | And ConditionalExp ConditionalExp
+  -- ^
+  | Or ConditionalExp ConditionalExp
+  -- ^
+  | StringMatch ByteString
+  -- ^
+  | StringAt ByteString Word
+  -- ^
+  | StringIn ByteString Word Word
+  -- ^
+  | StringCount ByteString Ordering Word
+  -- ^
+  | Offset ByteString Word
+  -- ^
+  | FileSize Int Ordering
+  -- ^
+  | RuleReference ByteString
+  -- ^ Holder of a reference to another rules success.
+  deriving Show
+
+-- |
+type Conditions = Seq.Seq ConditionalExp
+
+-- |
+data Rule = Rule {
+    ruletype   :: RuleType
+  , rulename   :: ByteString
+  , tags       :: Set.Set ByteString
+  , metadatum  :: Metadatum
+  , patterns   :: Patterns
+  , conditions :: Conditions
+  }
+
+
+
+
+
+
+
+
+
+
 data PkgName = ByteString
 
 data Name = LocalName ByteString
           | CmdName ByteString
           -- ImportName NameSpace PkgName ByteString
 
-data RuleBlock = RuleBlock {
-    ruletype   :: RuleType
-  , rulename   :: RuleName
-  , tags       :: Set.Set TagName
-  , meta       :: Set.Set (Identifier, Value)
-  , stringss   :: !(Set.Set RuleStrings)
-  , conditions :: Bool
-  }
 
-type TagName = ByteString
-type RuleName = ByteString
-type RuleStrings = ByteString
-type MetadataSnippet = ByteString
 
 --data BinOp = BinOp {-# Unpack #-} Int!
 

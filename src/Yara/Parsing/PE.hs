@@ -15,7 +15,7 @@ module Text.Yara.Parsing.PE where
 
 
 
-numberOfSections :: YaraParser _
+numberOfSections :: YP _
 numberOfSections = do
   string "number_of_sections"
   spaces
@@ -24,7 +24,7 @@ numberOfSections = do
   i <- decimal
   _ doSomething i
 
-exports :: YaraParser _
+exports :: YP _
 exports = do
   string "exports"
   spaces
@@ -35,9 +35,9 @@ exports = do
   closeParen
   _ doSomething i
 
-dll :: YaraParser _
+dll :: YP _
 dll = do
   string "DLL"
   _
 
-characteristics :: YaraParser _
+characteristics :: YP _

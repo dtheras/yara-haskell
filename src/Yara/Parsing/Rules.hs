@@ -2,8 +2,6 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE BlockArguments #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE GADTs #-}
 -- |
 -- Module      :  Yara.Parsing.Rules
 -- Copyright   :  David Heras 2018-2019
@@ -57,7 +55,7 @@ data Comment = MultiLineComment ByteString
 -- > // ... and this is single-line comment
 --
 -- Returns the just the comment contents
-comment :: YaraParser Comment
+comment :: YP Comment
 comment = do -- Double Line
   string "/*"
   bs <- scan False $ \s b -> if
@@ -81,7 +79,7 @@ parseRules = handleComments $ do
   ...
   parserN
 
-handleComments :: YaraParser a -> YaraParser a
+handleComments :: YP a -> YP a
 handleComments p = case runParser p of
   sucessfill -> then sucessful
   fail       -> do
@@ -97,14 +95,13 @@ badModule i = fault $ "'" ++ i ++ "' is not an imported module"
 --data ConditionOperator a =
   --MkHash :: Hash -> ConditionOperator Hash
  -- MkFile ::
-bool :: YaraParser Bool
-bool = (string "false" $> False)
-   <|> (string "true" $> True)
-   <?> "bool"
+bool :: YP Bool
+bool = (string "false" $> False) <|> (string "true" $> True) <?> "bool"
 {-# INLINE bool #-}
 
-value :: YaraParser Value
-value = (ValueB <$> bool) <|> {-ValueS <$> quotedString,-} (ValueI <$> decimal)
+value :: YP Value
+value = (ValueBool <$> bool) <|> {-ValueS <$> quotedString,-}
+        (ValueInteger <$> decimal)
 {-# INLINE value #-}
 
 -- KEYWORD SETS
@@ -127,60 +124,33 @@ isKeyword = flip Set.member yaraKeywords
 -- IDENTIFIERS
 
 
-
-
-
-
-
-
-isUnderscore, isLeadingByte, isIdByte :: Byte -> Bool
-isUnderscore  = (== 95)
-isLeadingByte = isAlpha <> isUnderscore
-isIdByte      = isAlphaNum <> isUnderscore
-{-# INLINE isUnderscore, isLeadingByte, isIdByte #-}
-
-
 -- possibly temporary. does the parsing of an identifier
--- but doesnt check if imported. helpful
-identifier_ :: YaraParser ByteString
-identifier_ = do
+-- but doesnt check if imported. very helpful.
+_identifier :: YP ByteString
+_identifier = do
   -- must start with underscore or letter
   w <- satisfy isLeadingByte
   r <- scan 0 rho
   let i = w <+ r
+  b <- peekByte
+  if -- If the following byte is an id byte then identifier is illegal
+     | isIdByte b -> do
+         rest <- takeWhile isIdByte
+         fault $ "Illegal identifier (must be <128 bytes): " ++ i ++ rest
      -- Keywords are not acceptable
-  if | isKeyword i -> fault $ "Identifier cannot be a keyword: '" ++ i ++ "'"
+     | isKeyword i -> fault $ "Identifier cannot be a keyword: '" ++ i ++ "'"
      -- Simply an underscore or digit is not an acceptable identifier
      | null r && not (isAlpha w) -> fault $ "Unacceptable identifier: " +> w
      -- Otherwise, we have an acceptable identifier
      | otherwise   -> pure i
-  <?> "identifier_"
-  where -- Read only upto 128 bytes (127 plus leading byte)
+  <?> "_identifier"
+  where
+    -- Read only upto 128 bytes (127 plus leading byte)
     rho :: Int -> Byte -> Maybe Int
     rho n b | n < 0 || 127 <= n  = Nothing
             | isIdByte b         = Just $ n + 1
             | otherwise          = Nothing
-{-# INLINE identifier_ #-}
-
-
--- possibly temporary
--- just parses an identifier/ import
---
-identifierWithImport :: YaraParser Identifier
-identifierWithImport = do
-  i <- identifier_
-  b <- isDot <$> peekByte
-  -- If the next byte is a dot, may be trying to import a module.
-  -- Parse another identifier and check if it was imported
-  forkA b (pure i) $ do
-    -- Ensure that possible module is an imported one.
-    m <- reader imports
-    if Set.member i m
-       then dot *> identifier_
-       else badModule i
-  <?> "identifier_"
-{-# INLINE identifierWithImport #-}
-
+{-# INLINE _identifier #-}
 
 -- | Parses an identifier.
 --
@@ -195,98 +165,127 @@ identifierWithImport = do
 --
 -- We additionally imposed that identifiers cannot be a single number or
 -- just an underscore for the time being, due to parsing issues.
-identifier :: YaraParser ByteString
+identifier :: YP ByteString
 identifier = do
-  l <- identifier_
-  s <- getStrings
-  if l `Set.member` s
-    then pure l
-    else fault $ "String not in scope: " ++ l
+  i <- _identifier
+  b <- isDot <$> peekByte
+  -- If the next byte is a dot, may be trying to import a module.
+  -- Parse another identifier and check if it was imported
+  if b
+    then do -- Ensure that possible module is an imported one.
+      m <- reader imports
+      if Set.member i m
+        then dot *> _identifier
+        else badModule i
+    else pure i
+  <?> "identifier"
 {-# INLINE identifier #-}
 
+-- | Parse an identifier that doesn't/isn't "imported," ie. is not module name
+-- trailed by a '.' trailed by an identifier
+identifierNoImport :: YP ByteString
+identifierNoImport = do
+  l <- _identifier
+  s <- getStrings
+  if l `Map.member` s
+    then pure l
+    else fault $ "String not in scope: " ++ l
+{-# INLINE identifierNoImport #-}
 
 -- | Parse an identifier preceeded by a '$'
--- Returns only the identifier
-label :: YaraParser ByteString
-label = liftA2 seq (byte 36) identifier
+-- Returns only the identifier.
+label :: YP ByteString
+label = liftA2 seq dollarSign identifierNoImport
 {-# INLINE label #-}
 
 
-ruleType :: YaraParser RuleType
+-- strings             ->
+-- patterns            ->
+-- identifiers         ->
+-- identifiersWOImport -> situations where an identifier cannot be imported
+--    eg: rule name.
+--
+-- labels        -> identifiers that are preceeded by a '$'
+-- labelWOImport -> idenitifers that are preceeded by a '$'
+
+
+ruleType :: YP RuleType
 ruleType = do
+  spaces
   b <- peekByte
   case b of
+    -- If 'r' then could only expect string  "rule."
     114 -> rule $> Normal
-    103 -> (liftA2 (<>) global $ option Normal private) <* rule
-    112 -> (liftA2 (<>) private $ option Normal global) <* rule
-    _   -> fault $ "Encountered unexpected byte: '" +> b ++ "'"
+    -- If 'g' then could only expect string "global"
+    -- ...but that may be followed be either string "rule" or "global"
+    103 -> liftA2 (<>) global (private <* rule <|> rule)
+    -- If 'p' then could only expect the string "private"
+    -- ... which may be followed be either string "rule" or "global"
+    112 -> liftA2 (<>) private (global <* rule <|> rule)
+    -- Any other byte would suggest we've run into gibberish, so gobble it up
+    -- and let them know!
+    _   -> do
+      gibberish <- takeWhile $ not . isSpace
+      fault $ "Unrecognized keyword: '" ++ gibberish ++ "'"
   <?> "ruleType"
-  where global = string "global" <* space1 $> Global <?> "global"
+  where -- The key words "rule", "global" & "private" must be followed by at
+        -- least one whitespace byte. Returns the assciated RuleType.
+        global  = string "global"  <* space1 $> Global  <?> "global"
         private = string "private" <* space1 $> Private <?> "private"
-        rule = string "rule" <?> "rule"
+        rule    = string "rule"    <* space1 $> Normal  <?> "rule"
+        -- NOTE: According to YARA specification, anonymous rules seem to not
+        -- be a supported feature and thus must have a label. Hence "rule" is
+        -- to be followed by at least one whitespace token to seperate it from
+        -- the rule label.
 {-# INLINE ruleType #-}
 
 
--- |
---
---               | Type        -> RuleType
---  RuleBlock -- | Name        -> Identifier
---               | :
---               | Tags        -> [Identifiers]
---               | {
---               | Metadata    -> [String Literal]
---               | Strings     -> [Hex-byte String | String Literal | Regex]
---               | Conditions  -> Many types
---               | }
---
---
-ruleBlock :: YaraParser ByteString
-ruleBlock = do
-  spaces
-  r <- ruleType
-  n <- skipTo identifier
-  t <- option mempty $ do
-      skipTo colon
-      skipTo (sepBy1Set identifier space1)
-  skipTo openCurl
-  m <- perhaps metadata
---s <- perhaps strings
---modify (\e -> e { localStrings = s })
---c <- perhaps conditions
-  spaces
-  skipTo closeCurl
-         -- return t) <|> pure [""] -- tags-}
-  -- need to merge if multiple of same tags
-  def
-  --return $ RuleBlock r n t _ _ _ --
-
--- ruleBlock = RuleBlock <$> ruleType
-                      -- <*> ruleName
-                     --  <*> ruleTags
-                     --  <*  openCurl
-                      -- <*> ruleMetadata
-                      -- <*> ruleStrings
-                     --  <*> ruleConditions
-                     --  <* closeCurl
-
 
 -- type Metadata = Map.Map Identifier Value
-metadata :: YaraParser Metadata
-metadata = do
+parseMetadatum :: YP Metadatum
+parseMetadatum = do
+  -- Preceeded by the keyword "meta"
   skipTo $ string "meta:"
-  space1
-  sepByMap (pair identifier (Just $ space1 *> equal *> space1) value)  space1
+  -- First meta
+  seekFirstMetadataLn
+  sepByMap (pair identifier (Just $ space1 *> eq *> space1) value)  space1
+  where
+    seekFirstMetadataLn = do
+      horizontalSpace
+      endOfLine
+      spaces
+      <?> ""
 
-sss :: YaraParser Metadata
+
+
+
+
+
+{-- |
+--
+--
+-- 2.3.9 Anonymous strings
+sss :: YP Metadata
 sss = do
   skipTo $ string "strings:"
   space1
-  sepByMap (pair label (Just $ space1 *> equal *> space1) value)  space1
-
+  sepByMap (pair label value) space1
+  where
+    aux = do
+      dollarSign
+      label
+      spaces *> eq *> spaces
+-}
 
 -- | Parse a regex string -- Text.Regex.TDFA
-regex :: YaraParser (ByteString -> ByteString)
-regex = (=~) <$> (byte 47 *> scan False p) <?> "error building regex map"
+regex :: YP (ByteString -> ByteString)
+regex = do
+  -- Opens with a forward slash '/'
+  fSlash
+  -- Scan source until unescaped forward slash '/' is encountered
+  rx <- scan False p
+  return $ (rx =~)
+  <?> "error building regex map"
   where p s w | s && w /= 47  = Nothing
               | w == 47       = Just True
               | otherwise     = Just False
@@ -298,113 +297,135 @@ regex = (=~) <$> (byte 47 *> scan False p) <?> "error building regex map"
 ---------------------- CONDITIONS ---------------------------
 -------------------------------------------------------------
 
-data TopCondition
-  = FileSize { size :: Int, ordering :: Ordering }
-  | Boolean Bool
-  | ConditionTree SubCondition
-  | Empty
-  deriving Show
 
-data Condition
-  = AndCon Condition Condition
-  | OrCon Condition Condtition
-  | StringMatch ByteString
-  | StringAt ByteString Word64
-  | StringIn ByteString Word64 Word64
-  | Offset ByteString Word64
+-- | 'parseCondition' is the main function that parses a conditional line in a
+-- YARA rules file
+parseConditions :: YP ConditionalExp
+parseConditions = undefined
 
-{-
-subCondition :: YaraParser
-subCondition = do
-  b <- peekByte
-  if b paren
-    then do
-      oparen
-      m <- subCondition
-      closeparen
-      return m
+
+parseACondition :: YP ConditionalExp
+parseACondition = undefined
+
+
+
+--- horribly inefficent because if it gets to the  "and" and finds a "r"
+-- itll restart from the begining of the parser 
+and :: YP ConditionalExp
+and = do
+  c1 <- condition
+  horizontalSpaces
+  string "and"
+  horizontalSpaces
+  c2 <- perhaps condition
+  if c2 == Nothing
+    then undefined
     else
-      parseOneOfSubconditions
--}
+     return $ And c1 c2
 
-parseCondition :: YaraParser TopCondition
-parseCondition = undefined
-
+condition :: YP ConditionalExp
+condition = do
+  b <- peekByte
+  if b == 40       -- if '('
+    then do
+      c <- condition
+      cParen
+      return c
+    else undefined
+      --one of the conditions
 
 -- | YARA specification allows offsets to be written in hexadecimal with
 -- prefix '0x' (we allow '0X' as well) as its handy when writing
 -- virtual addresses.
-offset :: YaraParser Int64
+offset :: YP Word
 offset = decimal <|> hexadecimal
 {-# INLINE offset #-}
 
 
-parseOrdering :: YaraParser Ordering
-parseOrdering = byte 60 $> LT <|> byte 61 $> EQ <|> byte 62 $> GT
-{-# INLINE parseOrdering #-}
-
-
-countingString :: YaraParser Condition
-countingString = do
+-- | DONE 2.3.1 Counting strings
+stringCount :: YP ConditionalExp
+stringCount = do
   byte 35          -- For counting occurences of strings, identifiers are
   i <- identifier  -- preceeded by a '#' rather than the normal '$'
-  s <- getStrings
-  if i `Set.notMember` s
-    then fault $ "string not in scope: " ++ i
+  horizontalSpaces
+  p <- ordering
+  horizontalSpaces
+  n <- decimal
+  pure $ StringCount i p n
+{-# INLINE stringCount #-}
+
+
+-- | Get the offset or virtual address of the i-th occurrence of string $a
+-- by using @a[i]. The indexes are one-based, so the first occurrence would
+-- be @a[1] the second one @a[2] and so on. If you provide an index greater
+-- then the number of occurrences of the string, the result will be a Nothing.
+offsetOf :: YP ConditionalExp
+offsetOf =
+  liftA2 Offset (identifier <* sqBra <* spaces) (offset <* spaces <* sqKet)
+{-# INLINE offsetOf #-}
+
+-- DONE 2.3.2
+stringInAt :: YP ConditionalExp
+stringInAt = do
+  i <- label
+  horizontalSpaces
+  s <- string "at" <|> string "in"
+  horizontalSpaces
+  if s == "at"
+    then do
+      n <- offset
+      return $ StringAt i n
     else do
-      spaces
-      o <- parseOrdering
-      spaces
-      n <- decimal
-      return StringAt i o n
-{-# INLINE countingString #-}
+      oParen
+      l <- offset
+      ellipsis
+      -- Remark: YARA spec allows the string "filesize" to indicate
+      -- the upper offset as the end of file
+      u <- offset -- <|> string "filesize" *> getFilesize
+      cParen
+      return $ StringIn i l u
+{-# INLINE stringInAt #-}
 
 
-offsetOf :: YaraParser Condition
-offsetOf = do
-  b <- identifier
-  sqBra *> spaces
-  d <- offset
-  spaces *> sqKet
-  s <- getStrings
-  return $ Offset b d
 
-
-stringAt :: YaraParser Condition
-stringAt = do
-  i <- label
-  spaces
-  string "at"
-  spaces
-  n <- offset
-  return $ StringAt i n
-{-# INLINE stringAt #-}
-
-stringIn :: YaraParser Condition
-stringIn = do
-  i <- label
-  spaces
-  string "in"
-  spaces
-  openParen
-  spaces
-  l <- offset
-  spaces
-  ellipsis
-  spaces
-  -- Remark: YARA spec allows the string "filesize" to indicate
-  -- the upper offset as the end of file
-  u <- offset <|> string "filesize" *> getFilesize
-  spaces
-  closeParen
-  return $ StringIn i l u
-{-# INLINE stringIn #-}
-
-
+-- 2.3.11 Referencing other rules
+-- | 'ruleRef'
+-- When writing the conditions for a certain rule, you can also make reference
+-- to a rule in a manner that resembles a function invocation
+-- of traditional programming languages. In this way you can create rules
+-- that depend on others. Let’s see an example:
+--
+-- rule Rule1 {
+--    strings:
+--        $a = "dummy1"
+--    condition:
+--        $a
+-- }
+-- rule Rule2 {
+--    strings:
+--        $a = "dummy2"
+--    condition:
+--        $a and Rule1
+-- }
+--
+-- As can be seen in the example, a file will satisfy Rule2 only if it
+-- contains the string “dummy2” and satisfies Rule1. Note that it is strictly
+-- necessary to define the rule being invoked before the one that will make
+-- the invocation.
+ruleRef :: YP ConditionalExp
+ruleRef = do
+  -- Why '_identifier' instead of 'identifier'?
+  -- Need to avoid the check that it is in the strings (its empty anyways).
+  i <- _identifier
+  r <- getInscopeRules
+  if i `Set.member` r
+    then pure $ RuleReference i
+    else fault $ "Referenced rule is not in scope '" ++ i ++ "'"
 
 
 -- 2.3.4
--- | Match filesize of file being scanned; size is expressed in bytes.
+-- |
+-- Match filesize of file being scanned; size is expressed in bytes.
 --
 -- rule FileSizeExample
 -- {
@@ -412,51 +433,66 @@ stringIn = do
 --        filesize > 200KB
 -- }
 --
-conditionFilesize :: YaraParser Condition
+-- Here: the parser doesn't immediately check the condition, true or false.
+--
+-- 1) parsing of yara rules is pure. so we cannot simply fetch it.
+-- 2) it could be included in state? no. if we are scanning several documents,
+--    it varies. plus it would mean calculating file size ahead of time with
+--    no promise of using it. may be an issue on huge files.
+-- 3) but keeping a constructor with two fields is computationally higher than
+--    just a bool. Not entirely. Since ti would be a bool contructor wrapper
+--    around the value anyways. so its neglegible.
+--
+-- Note: this is distinct from the "filesize" keyword, which gets replaced with
+-- the value of the file-being-scanned's digital size.
+--
+conditionFilesize :: YP ConditionalExp
 conditionFilesize  = do
   string "filesize"
-  skipSpace
-  o <- parseOrdering
-  skipSpace
-  s <- decimal
-  u <- ext
-  space1
-  return $ maybe (FileSize s o) (\x -> FileSize (x * s) o) u
-  where
-    check = foldMap string
-    ext = option Nothing (Just <$> asum
-             $ foldMap string
-            <$> [ foldMap string ["B", "b"] $> 1
-                , foldMap string ["KB", "kb", "Kb"] $> 1000
-                , foldMap string ["MB", "mb", "Mb"] $> 1000000
-                , foldMap string ["GB", "gb", "Gb"] $> 1000000000 ])
+  spaces          -- 0 or more horizontal spaces is OK
+  o <- ordering   -- '<' '>' or '=='
+  spaces          -- 0 or more horizontal spaces is OK
+  s <- decimal    -- integer value
+  u <- takeWhile isAlpha  -- Handle the units
+  let fac = case toLower u of
+        ""   -> 1
+        "b"  -> 1
+        "kb" -> 1000
+        "mb" -> 1000000
+        "gb" -> 1000000000
+        "tb" -> 1000000000000
+        _    -> 0
+  if fac > 0
+    then return $ FileSize (fac * s) o
+    else fault $ "Unrecognized units value for a filesize: '" ++ u ++ "'"
 {-# INLINE conditionFilesize #-}
 
 
--- 2.3.6 Accessing data at a given position
--- not implimented yet
+data SetOfStrings
+  = AllOfStrings
+  | AnyOfStrings
+  | OfStrings Word
 
-
-data SetOfStringsCount
-  = All
-  | Any
-  | N Word64
-
-conditionSetOfStrings :: YaraParser Condition
+conditionSetOfStrings :: YP ConditionalExp
 conditionSetOfStrings = do
   _ <- string "all" $> All
          <|> string "any" $> Any
-         <|> N <$> decimal 
+         <|> N <$> decimal
   spaces
   string "of"
   spaces
-  _ <- grouping _ comma
-  _
+  --_ <- (grouping (label <|> regex) comma)
+   --    (string "them") <|>
+  fault "" 
 
 
 
-and :: YaraParser Condition
-and = do
+
+
+allconditions = ruleRel <|> conditionFilesize <|> conditionSetOfStrings
+{-
+_and :: YP Condition
+_and = do
   m <- subCondition
   spaces
   string "and"
@@ -464,7 +500,7 @@ and = do
   n <- subCondition
   return $ AndCon m n
 
-
+-}
 
 
 
@@ -480,8 +516,8 @@ and = do
 {-
 block :: (a -> f a -> f a)
       -> ByteString
-      -> YaraParser a
-      -> YaraParser (f a)
+      -> YP a
+      -> YP (f a)
 block s p = do
   string s <* colon
   skipTo $ sepBy p space1
@@ -491,7 +527,7 @@ block s p = do
 
 
 {-
-strModifiers :: YaraParser
+strModifiers :: YP
 strModifiers = do
   skipTo $ perhaps "xor"
   sepBy1Set space1 $ foldMap string ["ascii", "fullword", "nocase", "wide"]
@@ -507,7 +543,7 @@ strModifiers = do
 --    - metadata block
 --    - strings block
 --    - conditions block (depends on the strings block)
-parseRuleBlock :: YaraParser ()
+parseRuleBlock :: YP ()
 parseRuleBlock = do
   oCurl
   meta <- parseMetadata keep_meta
@@ -520,12 +556,12 @@ parseRuleBlock = do
 
 -- HEX
 
-hexPr :: YaraParser HexTokens
+hexPr :: YP HexTokens
 hexPr = Seq.singleton . uncurry Pair <$> (hexDigit `pair` hexDigit)
      where hexDigit = satisfy $ \w -> w == 63 || w - 48 <=  9
                               || w - 97 <= 25 || w - 65 <= 25
 
-hexJump :: YaraParser HexTokens
+hexJump :: YP HexTokens
 hexJump = between sqBra sqKet $ do
   l <- optional decimal
   flank space dash
@@ -536,7 +572,7 @@ hexJump = between sqBra sqKet $ do
     | isNothing u                 -> IJmp <$> l
     | otherwise                   -> uncurry RJmp <$> untuple (l,u)
 
-hex :: YaraParser HexStr
+hex :: YP HexStr
 hex = between oCurl cCurl $ sepBy1 (hexGrp <|> hexStd) space1
   where
     hexAux = Seq.fromList <$> sepBy1 (hexPr <|> hexJump) space1
@@ -545,7 +581,7 @@ hex = between oCurl cCurl $ sepBy1 (hexGrp <|> hexStd) space1
 
 -- PARSE YARA STRING
 
-patterns :: YaraParser YaraStr
+patterns :: YP YaraStr
 patterns = do
   l <- label
   skipTo eq
@@ -563,7 +599,7 @@ patterns = do
     scan = foldl (|>) empty <$> scan' -- change to a sequence
 
 
-parseConditions :: YaraParser ()--[(ByteString,Pattern)]->Parser[ByteString->Bool]
+parseConditions :: YP ()--[(ByteString,Pattern)]->Parser[ByteString->Bool]
 parseConditions = do
   string "condition:"
   skipSpace
@@ -589,17 +625,8 @@ main =
 -}
 
 
-
-data ParOrd = LEQ_ | LT_ | EQ_ | GT_ | GEQ_
-
-relOp :: YaraParser ParOrd
-relOp = asum [ lt $> RelOpLT
-               , gt $> RelOpGT
-               , eq *> eq $> RelOpEQ
-               , gt *> eq $> RelOpGEQ
-               , lt *> eq $> RelOpLEQ ]
-
-range :: YaraParser (Word64, Word64)
+{-}
+range :: YP (Word64, Word64)
 range = do
   openParen
   spaces
@@ -612,4 +639,137 @@ range = do
   u <- decimal <|>
   spaces
   closeParen
+-}
 
+
+
+-- |
+--
+--               | Type        -> RuleType
+--  RuleBlock -- | Name        -> Identifier
+--               | :
+--               | Tags        -> [Identifiers]
+--               | {
+--               | Metadata    -> [String Literal]
+--               | Strings     -> [Hex-byte String | String Literal | Regex]
+--               | Conditions  -> Many types
+--               | }
+--
+--
+ruleBlock :: YP ByteString
+ruleBlock = do
+  spaces
+  r <- ruleType
+  n <- skipTo identifier
+  t <- option mempty $ do
+      skipTo colon
+      skipTo (sepBy1Set identifier space1)
+  skipTo oCurly
+  m <- perhaps metadatum
+--s <- perhaps strings
+--modify (\e -> e { localStrings = s })
+--c <- perhaps conditions
+  spaces
+  skipTo cCurly
+         -- return t) <|> pure [""] -- tags-}
+  -- need to merge if multiple of same tags
+  def
+  --return $ RuleBlock r n t _ _ _ --
+
+-- ruleBlock = RuleBlock <$> ruleType
+                      -- <*> ruleName
+                     --  <*> ruleTags
+                     --  <*  openCurl
+                      -- <*> ruleMetadata
+                      -- <*> ruleStrings
+                     --  <*> ruleConditions
+                     --  <* closeCurl
+
+data YaraDoc = YaraDoc {
+     docImports  :: Set.Set ByteString
+  ,  docIncludes :: Set.Set ByteString
+  ,  docRules    :: Set.Set YaraRuleBlock
+  }
+data YaraRuleBlock
+
+{-
+
+preprocess :: FilePath -> IO YaraDoc
+preprocess fp = do
+  b <- doesFileExist fp
+  if b
+    then undefined
+    else undefined
+  s <- preprocessIncludes
+  return ""
+
+-- 2.8 include files
+-- run a preprocessing phase!
+--preprocessing =
+--
+-- The argument passed in is the
+--
+-- NOTE: the function operates under the hypothesis that all "include"
+--       statements are placed before all rule statements. Spec says "include"
+--       statements behave as in C source files and those come at the begining
+--       of C documents
+--
+preprocessIncludes :: FilePath
+                   -- ^ Location of YARA rule in focus.
+                   -> IO ByteString
+                   -- ^ Results of expansion during preproccessing phrase
+preprocessIncludes fp = do
+    else do
+      y <- readFile fp
+          lns = lines y
+      foldrM (\a acc -> liftA2 mplus (go fp a) (return acc)) [] bs
+  where
+
+    -- An YARA rule that gets "included" into a document may itself be
+    -- in another folder and have its own "included" rules, (which will)
+    -- be relative to included rule rather than the original) we need to
+    -- manipulate the filepath a bit
+    relFilePath :: FilePath -- current YARA rule
+                -> FilePath -- relative location of included rule
+                -> FilePath -- relative filepath from current dir
+    relFilePath c f = dropFileName c </> f
+
+    -- 'go' runs the 'include' parser and handles the results
+    go :: FilePath -> ByteString -> IO [ByteString]
+    go lc bs = case parseDef (processLine <|> pure $ Left bs) bs of
+      Left bs  -> undefined
+      Left ot  -> undefined
+      Right fp -> do
+        b <- doesFileExist fp
+        -- Note the recursion!
+        -- First: an included YARA rule could contain its own 'include' pragmas
+        --        which must be handled (which may contain their own includes)
+        -- Second: those include filepaths will be written relative to their
+        --         location in the directory, not the original, so that must
+        --         be handled
+
+    include :: ByteString -> Either ByteString ByteString
+    include bs = if isPrefixOf "include" bs
+      then let bs_ = drop 7 bs
+           in case parseDef (processLine <|> pure $ Left bs) of
+
+      else Left ""
+      where
+        processLine = do
+          buf <- getBuffer
+          takeWhile1 isHorizontalSpace
+          fp <- quotedString
+          takeWhile isHorizontalSpace
+          b <- atEnd
+          return $ if b
+            then Right fp
+            else Left $ take 5 buf ++ ".."
+
+
+
+newtype Proc a = Proc (IO (Either ProcessError a))
+  deriving (Functor, )
+
+instance Functor Proc where
+  fmap f (Proc a) = Proc (liftM . liftM $ f a)
+-}

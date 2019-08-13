@@ -11,7 +11,7 @@
 -- Portability :  portable
 --
 --  A library for FilePath manipulations using bytestrings.
-module Text.Yara.System.FilePath where
+module Yara.System.FilePath where
 
 import Prelude hiding (last, null, span, (++))
 import Yara.Parsers.Utilities (isWindows)
@@ -21,9 +21,12 @@ import Data.ByteString.Internal (accursedUnutterablePerformIO, ByteString(..))
 import Data.ByteString.Unsafe
 import Foreign
 
-import Text.Yara.Shared
+import Yara.Shared
 --infixr 7  <.>, -<.>
 --infixr 5  </>
+
+
+
 
 
 {--------------------------------------------------------------------}
@@ -109,6 +112,7 @@ splitDrive x | Just y <- readDriveShare x  = y
 splitDrive x                               = ("",x)
 {-# INLINE splitDrive #-}
 
+
 readDriveLetter :: FilePath -> Maybe (FilePath, FilePath)
 readDriveLetter fp = case uncons2 fp of
   Just (x,colon,xs) -> if
@@ -117,6 +121,7 @@ readDriveLetter fp = case uncons2 fp of
                   else Just (x <+ ":", xs)
             | otherwise ->  Nothing
   _             -> Nothing
+
 
 readDriveShare :: FilePath -> Maybe (FilePath, FilePath)
 readDriveShare fp = case uncons2 fp of
@@ -185,3 +190,11 @@ makeValid path
             where (a,b) = break isPathSeparator x
         h x = if map toUpper (dropWhileEnd (== ' ') a) `elem` badElements then a ++ "_" <.> b else x
             where (a,b) = splitExtensions x
+
+
+
+
+
+
+dropFileName :: FilePath -> FilePath
+dropFileName = undefined
