@@ -1,5 +1,6 @@
-{-# OPTIONS_GHC -funbox-strict-fields #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# OPTIONS_GHC -funbox-strict-fields #-}
 -- |
 -- Module      :  Yara.Parsing.Buffer
 -- Copyright   :  David Heras 2018-2019
@@ -13,24 +14,28 @@
 -- (for our parsing operations) structure.
 --
 module Yara.Parsing.Buffer (
-  Pos, Buffer(..),
-  toBuffer, bufferLength, bufferLengthAtLeast,
-  bufferPappend, bufferAppend, bufferUnsafeIndex,
-  bufferUnsafeDrop, bufferElemAt, bufferSubstring,
-
-  -- ! CAREFULL ! See documentation.
-  accursedUnutterablePerformIO
+    Pos
+  , Buffer(..)
+  , toBuffer
+  , bufferLength
+  , bufferLengthAtLeast
+  , bufferPappend
+  , bufferAppend
+  , bufferUnsafeIndex
+  , bufferUnsafeDrop
+  , bufferElemAt
+  , bufferSubstring
+  , accursedUnutterablePerformIO  -- Carefull, see documentation.
   ) where
 
-import Prelude hiding (length, map)
-import Control.Exception
+import Yara.Prelude
+
 import Data.ByteString.Internal
 import Foreign.ForeignPtr
 import Foreign.Ptr
 import Foreign.Storable
 import GHC.ForeignPtr
     -----
-import Yara.Shared
 
 type Pos = Int
 

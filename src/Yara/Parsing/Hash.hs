@@ -1,8 +1,9 @@
-{-# OPTIONS_GHC -funbox-strict-fields #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE BlockArguments #-}
-{-# LANGUAGE  UnboxedSums #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE UnboxedSums #-}
 {-# LANGUAGE PackageImports #-}
+{-# OPTIONS_GHC -funbox-strict-fields #-}
 -- Note: Regarding the use of PackageImports
 --
 -- Several hours were spent attempting to resolve the ghci complaint:
@@ -42,6 +43,10 @@
 --
 module Yara.Parsing.Hash ( parseHash ) where
 
+import Yara.Prelude
+import Yara.Parsing.Parser
+import Yara.Parsing.Combinators
+
 import Control.Applicative
 import "cryptonite" Crypto.Hash
 import qualified Data.ByteString.Lazy as L
@@ -49,9 +54,7 @@ import qualified Data.ByteString as S
 import Data.Digest.Adler32 ()
 import Data.ByteArray hiding (null)
 import Data.Int
-    -----
-import Yara.Parsing.Parser
-import Yara.Parsing.Combinators
+
 
 -- | Store results of parsing hash in yara rule.
 --
@@ -72,7 +75,7 @@ data Hash
 data HashArgs = Int64Args !Int64 !Int64
               | StringArg S.ByteString
 
-parseHash :: YP Hash
+parseHash :: Yp Hash
 parseHash = flip (<?>) "parseHash" $ do
   -- Parse hash name
   hs <- oneOfStrings ["md5", "sha1", "sha256", "checksum32"] <?> noImportMsg
@@ -98,16 +101,16 @@ parseHash = flip (<?>) "parseHash" $ do
 
   where
 
-    parseLiteralArg :: YP HashArgs
+    parseLiteralArg :: Yp HashArgs
     parseLiteralArg = StringArg <$> quotedString
 
-    parseFileArgs :: YP HashArgs
+    parseFileArgs :: Yp HashArgs
     parseFileArgs = do
-        u <- (hexadecimal <|> decimal) :: YP Int64
+        u <- (hexadecimal <|> decimal) :: Yp Int64
         spaces
         comma
         spaces
-        v <- (hexadecimal <|> decimal) :: YP Int64
+        v <- (hexadecimal <|> decimal) :: Yp Int64
         return $ Int64Args u v
 
     quotedString = undefined
@@ -134,4 +137,3 @@ handleFileArgs :: S.ByteString
                -> S.ByteString -- ^ String to match
                -> Hash
 handleFileArgs = undefined
-

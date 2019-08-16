@@ -1,6 +1,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 -- |
 -- Module      :  Yara.Parsing.Types
 -- Copyright   :  David Heras 2018-2019
@@ -14,15 +15,13 @@
 --
 module Yara.Parsing.Types where
 
-import Prelude hiding ((++))
-import Data.ByteString
-import Data.Word
-    -----
+import Yara.Prelude
+
 import qualified Data.Map      as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Set      as Set
 
-import Yara.Shared
+
 
 -- CONSTANTS
 #define CO(label,val) label :: Word; label = val; {-# INLINE label #-}

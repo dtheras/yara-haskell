@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 -- |
 -- Module      :  Yara.Main
 -- Copyright   :  David Heras 2018-2019
@@ -9,8 +10,7 @@
 --
 -- yara-haskell is a Haskell implimentation of the YARA specification
 --
-import System.Posix.Env.ByteString (getArgs)
-import Yara.Shared
+import Yara.Prelude
 import Yara.Parsing.Args
 import Yara.Parsing.Parser
 
@@ -19,7 +19,7 @@ yara_haskell env = do
   args <- getArgs
   case parseArgs args of
     Done _ env'  -> undefined
-    Fail _ _ _   ->
+    Fail _ _ _   -> undefined
     Partial _    -> undefined
 
 
@@ -38,7 +38,8 @@ yara_haskell env = do
 --
 --
 --
-launchWithCustomModules :: _
+
+-- launchWithCustomModules :: _
 launchWithCustomModules = undefined
 
 

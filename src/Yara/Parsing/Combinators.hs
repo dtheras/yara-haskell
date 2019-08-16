@@ -1,11 +1,11 @@
+{-# LANGUAGE ApplicativeDo #-}
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE Rank2Types #-}
-{-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE BlockArguments #-}
 #ifdef hlint
 {-# ANN module "HLint: ignore Eta reduce" #-}
 #endif
@@ -22,28 +22,25 @@
 --
 module Yara.Parsing.Combinators where
 
-import Control.Monad.Reader
-import Control.Exception
-import Control.Applicative hiding (liftA2)
+import Yara.Prelude
+import Yara.Parsing.Buffer
+import Yara.Parsing.Parser
+
 import Data.Bits
-import Data.ByteString hiding (count, elem, empty, foldr, append, takeWhile)
-import qualified Data.ByteString       as BS (takeWhile)
+import qualified Data.ByteString       as BS (takeWhile, foldl')
 import qualified Data.ByteString.Char8 as C8
 import Data.ByteString.Internal
 import Data.ByteString.Unsafe
 import Data.Default
 import Data.Int
+import Data.Sequence ((<|))
 import Data.String
 import Foreign hiding (void)
-import Data.Sequence ((<|))
-    -----
+
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence   as Seq
 import qualified Data.Set        as Set
-    -----
-import Yara.Parsing.Buffer
-import Yara.Parsing.Parser
-import Yara.Shared
+
 
 
 
@@ -51,21 +48,21 @@ import Yara.Shared
 
 
 
-instance (a ~ ByteString) => IsString (YP a) where
+instance (a ~ ByteString) => IsString (Yp a) where
     fromString = string . C8.pack
 
 -- | Return remaining buffer as a bytestring
-getBuff :: YP ByteString
+getBuff :: Yp ByteString
 getBuff = YP $ \b e _ s -> s b e (bufferUnsafeDrop (position e) b)
 {-# INLINE getBuff #-}
 
 -- | Get next byte.
-nextByte :: YP Byte
+nextByte :: Yp Byte
 nextByte = satisfy $ const True
 {-# INLINE nextByte #-}
 
 -- | Return 'True' if buffer is empty
-endOfBuffer :: YP Bool
+endOfBuffer :: Yp Bool
 endOfBuffer = liftA2 (==) getPos (YP $ \b@(Buf _ _ l _ _) e _ s ->
                                     let p = position e
                                     in s b e $ assert (p >= 0 && p <= l) (l-p))
@@ -73,7 +70,7 @@ endOfBuffer = liftA2 (==) getPos (YP $ \b@(Buf _ _ l _ _) e _ s ->
 
 -- | This parser always succeeds.  It returns 'True' if the end
 -- of all input has been reached, and 'False' if any input is available
-atEnd :: YP Bool
+atEnd :: Yp Bool
 atEnd = YP $ \b e _ s ->
   if | position e < bufferLength b  -> s b e True
      | more e == Complete           -> s b e False
@@ -83,7 +80,7 @@ atEnd = YP $ \b e _ s ->
 {-# INLINE atEnd #-}
 
 -- | Match only if all input has been consumed.
-endOfInput :: YP ()
+endOfInput :: Yp ()
 endOfInput = YP $ \b e l s ->
   if | position e < bufferLength b  -> l b e [] "endOfInput"
      | more e == Complete           -> s b e ()
@@ -96,11 +93,11 @@ endOfInput = YP $ \b e l s ->
 
 -- | Run two parsers and return the pair of their results,
 -- while running a possible seperator parser
-pair :: YP a -> Maybe (YP s) -> YP b -> YP (a,b)
+pair :: Yp a -> Maybe (Yp s) -> Yp b -> Yp (a,b)
 pair u p v = liftA2 (,) (u <* maybe unit void p) v <?> "pair"
 {-# INLINE pair #-}
 
-option :: a -> YP a -> YP a
+option :: a -> Yp a -> Yp a
 option x p = p <|> pure x <?> "option"
 {-# INLINE option #-}
 
@@ -113,7 +110,7 @@ option x p = p <|> pure x <?> "option"
 -- >>> parse_ (perhaps alphaNum) ":yara"
 -- Done ":yara" Nothing
 --
-perhaps :: YP a -> YP (Maybe a)
+perhaps :: Yp a -> Yp (Maybe a)
 perhaps v = (Just <$> v) <|> pure Nothing <?> "perhaps"
 {-# INLINE perhaps #-}
 
@@ -122,68 +119,68 @@ perhaps v = (Just <$> v) <|> pure Nothing <?> "perhaps"
 -- >>> parse_ (many1 colon) ":::yara"
 -- Done "yara" [58, 58, 58]
 --
-many1 :: YP a -> YP [a]
+many1 :: Yp a -> Yp [a]
 many1 p = liftA2 (:) p (many p) <?> "many1"
 {-# INLINE many1 #-}
 
-sepBy :: YP a -> YP s -> YP [a]
+sepBy :: Yp a -> Yp s -> Yp [a]
 sepBy p s = liftA2 (:) p ((s *> sepBy1 p s) <|> def) <|> def <?> "sepBy"
 {-# INLINE sepBy #-}
 
-sepBySet :: Ord a => YP a -> YP s -> YP (Set.Set a)
+sepBySet :: Ord a => Yp a -> Yp s -> Yp (Set.Set a)
 sepBySet p s = liftA2 Set.insert p ((s *> sepBy1Set p s) <|> def) <|> def
 {-# INLINE sepBySet #-}
 
-sepByMap :: Ord k => YP (k,a)
-                  -> YP s
-                  -> YP (Map.Map k a)
+sepByMap :: Ord k => Yp (k,a)
+                  -> Yp s
+                  -> Yp (Map.Map k a)
 sepByMap p s =
   liftA2 (uncurry Map.insert) p ((s *> sepBy1Map p s) <|> def) <|> def
 {-# INLINE sepByMap #-}
 
-sepBySeq :: YP a -> YP s -> YP (Seq.Seq a)
+sepBySeq :: Yp a -> Yp s -> Yp (Seq.Seq a)
 sepBySeq p s = liftA2 (<|) p ((s *> sepBy1Seq p s) <|> def) <|> def
 {-# INLINE sepBySeq #-}
 
-sepBy1 :: YP a -> YP s -> YP [a]
+sepBy1 :: Yp a -> Yp s -> Yp [a]
 sepBy1 p s = let go = liftA2 (:) p ((s *> go) `mplus` def) in go
 {-# INLINE sepBy1 #-}
 
-sepBy1Set :: Ord a => YP a -> YP s -> YP (Set.Set a)
+sepBy1Set :: Ord a => Yp a -> Yp s -> Yp (Set.Set a)
 sepBy1Set p s = let go = liftA2 Set.insert p ((s *> go) `mplus` def) in go
 {-# INLINE sepBy1Set #-}
 
-sepBy1Map :: Ord k => YP (k,a)
-                          -> YP s -> YP (Map.Map k a)
+sepBy1Map :: Ord k => Yp (k,a)
+                          -> Yp s -> Yp (Map.Map k a)
 sepBy1Map p s =
   let go = liftA2 (uncurry Map.insert) p ((s *> go) `mplus` def) in go
 {-# INLINE sepBy1Map #-}
 
-sepBy1Seq :: YP a -> YP s -> YP (Seq.Seq a)
+sepBy1Seq :: Yp a -> Yp s -> Yp (Seq.Seq a)
 sepBy1Seq p s = let go = liftA2 (<|) p ((s *> go) `mplus` def) in go
 {-# INLINE sepBy1Seq #-}
 
-manyTill :: YP a -> YP b -> YP [a]
+manyTill :: Yp a -> Yp b -> Yp [a]
 manyTill p end = (end $> []) <|> liftA2 (:) p (manyTill p end)
 {-# INLINE manyTill #-}
 
 -- | Skip zero or more instances of an action.
-skipMany :: YP a -> YP ()
+skipMany :: Yp a -> Yp ()
 skipMany p = (p *> skipMany p) <|> unit
 {-# INLINE skipMany #-}
 
 -- | Skip one or more instances of an action.
-skipMany1 :: YP a -> YP ()
+skipMany1 :: Yp a -> Yp ()
 skipMany1 p = p *> skipMany p
 {-# INLINE skipMany1 #-}
 
 -- | Apply the iven action repeatedly, returning every result.
-count :: Int -> YP a -> YP [a]
+count :: Int -> Yp a -> Yp [a]
 count = replicateM
 {-# INLINE count #-}
 
 -- FIXED BYTE PARSERS
-#define CP(n,v) n :: YP Byte; n = byte v; {-# INLINE n #-}
+#define CP(n,v) n :: Yp Byte; n = byte v; {-# INLINE n #-}
 CP(tab,9)
 CP(quote,34)
 CP(dollarSign,36)
@@ -207,7 +204,7 @@ CP(cCurly,125)
 
 -- Ensure that a '<' or '>'  token is followed by any byte
 -- except '=' (otherwise token is '<=' or '>=' token)
-notFollowedByEq :: YP ()
+notFollowedByEq :: Yp ()
 notFollowedByEq = do
   b <- peekByte
   if isEqual b
@@ -222,27 +219,12 @@ DP(greaterthan,gt,notFollowedByEq,GT)
 DP(ellipsis,dot,dot,())
 #undef DP
 
-ordering :: YP Ordering
+ordering :: Yp Ordering
 ordering = lessthan <|> eqeq <|> greaterthan <?> "ordering"
 {-# INLINE ordering #-}
 
--- FAST PREDICATES
--- Yes - I am that lazy.
-#define PD(func,pred) func :: Byte -> Bool; func = pred; {-# INLINE func #-}
-PD(isDot,(==46))
-PD(isEqual, (==61))
-PD(isAlpha,\b -> b - 65 < 26 || b - 97 < 26)
--- | A fast digit predicate.
-PD(isDigit,\b -> b - 48 <= 9)
-PD(isAlphaNum, isDigit <> isAlpha)
-PD(isSpace, \b -> b == 32 || b - 9 <= 4)
--- | A predicate that matches either a carriage return @\'\\r\'@ or
--- newline @\'\\n\'@ character.
-PD(isEndOfLine, (== 13) <> (== 10))
--- | A predicate that matches either a space @\' \'@ or horizontal tab
--- @\'\\t\'@ character.
-PD(isHorizontalSpace, (== 32) <> (== 9))
 -- | Following three are for YARA strings.
+#define PD(func,pred) func :: Byte -> Bool; func = pred; {-# INLINE func #-}
 PD(isUnderscore,(== 95))
 PD(isLeadingByte,isAlpha <> isUnderscore)
 PD(isIdByte,isAlphaNum <> isUnderscore)
@@ -253,24 +235,15 @@ PD(isIdByte,isAlphaNum <> isUnderscore)
 -- | Peek at next byte.
 --
 -- Note: Doesn't fail unless at the end of input.
-peekByte :: YP Byte
+peekByte :: Yp Byte
 peekByte = YP $ \b e l s ->
   let pos = position e in
   if bufferLengthAtLeast pos 1 b
     then s b e (bufferUnsafeIndex b pos)
-    else ensureSuspended 1 b e l (\b_ e_ bs_ -> s b_ e_ $! unsafeHead bs_)
+    else ensureSuspended 1 b e l (\b_ e_ bs_ -> (s b_ e_ $! unsafeHead bs_))
 {-# INLINE peekByte #-}
 
--- | Peek at the next 'N' number of bytes
-peekNBytes :: Word -> YP ByteString
-peekNBytes n = YP $ \b e l s ->
-  let pos = position e in
-  if bufferLengthAtLeast pos n b
-   then s b e (bufferSubstring p n b)
-   else ensureSuspended 1 b e l (\b_ e_ bs_ -> s b_ e_ $! unsafeHead bs_)
-
-
-satisfy :: (Byte -> Bool) -> YP Byte
+satisfy :: (Byte -> Bool) -> Yp Byte
 satisfy p = do
   h <- peekByte
   if p h
@@ -279,13 +252,13 @@ satisfy p = do
 {-# INLINE satisfy #-}
 
 -- | Match a specific byte.
-byte :: Byte -> YP Byte
+byte :: Byte -> Yp Byte
 byte c = satisfy (== c)
          <?> sig c
 {-# INLINE byte #-}
 
 -- | Match any byte except the given one.
-notByte :: Byte -> YP Byte
+notByte :: Byte -> Yp Byte
 notByte c = satisfy (/= c)
             <?> "not '" +> c ++ "'"
 {-# INLINE notByte #-}
@@ -316,72 +289,54 @@ isOctByte b = b>=48 && b>=55
 -- | @hexadecimal@
 --
 -- Parser expects a leading @\"0x\"@ or @\"0X\"@ string.
-hexadecimal :: (Integral a, Bits a) => YP a
+hexadecimal :: (Integral a, Bits a) => Yp a
 hexadecimal = do
   byte 48               -- '0'
   byte 88 <|> byte 120  -- 'X' or 'x'
-  foldl' step 0 `fmap` takeWhile1 isHexByte
+  BS.foldl' step 0 `fmap` takeWhile1 isHexByte
   where
     step a w | w >= 48 && w <= 57  = (a `shiftL` 4) .|. fromIntegral (w - 48)
              | w >= 97             = (a `shiftL` 4) .|. fromIntegral (w - 87)
              | otherwise           = (a `shiftL` 4) .|. fromIntegral (w - 55)
-{-# SPECIALISE hexadecimal :: YP Int #-}
-{-# SPECIALIZE hexadecimal :: YP Int64 #-}
-{-# SPECIALISE hexadecimal :: YP Integer #-}
-{-# SPECIALISE hexadecimal :: YP Word #-}
+{-# SPECIALISE hexadecimal :: Yp Int #-}
+{-# SPECIALIZE hexadecimal :: Yp Int64 #-}
+{-# SPECIALISE hexadecimal :: Yp Integer #-}
+{-# SPECIALISE hexadecimal :: Yp Word #-}
 {-# INLINE hexadecimal #-}
 
-decimal :: Integral a => YP a
-decimal = foldl' step 0 `fmap` takeWhile1 isDigit
+decimal :: Integral a => Yp a
+decimal = BS.foldl' step 0 `fmap` takeWhile1 isDigit
   where step a b = a * 10 + fromIntegral (b - 48)
-{-# SPECIALISE decimal :: YP Int #-}
-{-# SPECIALISE decimal :: YP Int64 #-}
-{-# SPECIALISE decimal :: YP Integer #-}
-{-# SPECIALISE decimal :: YP Word #-}
+{-# SPECIALISE decimal :: Yp Int #-}
+{-# SPECIALISE decimal :: Yp Int64 #-}
+{-# SPECIALISE decimal :: Yp Integer #-}
+{-# SPECIALISE decimal :: Yp Word #-}
 {-# INLINE decimal #-}
 
--- | The parser @skip p@ succeeds for any byte for which the predicate
--- @p@ returns 'True'.
-
--- >skipDigit = skip isDigit
--- >    where isDigit w = w >= 48 && w <= 57
-skip :: (Byte -> Bool) -> YP ()
-skip p = do
-  h <- peekByte
-  forkA (p h) (pure ()) $
-    advance 1
-  <?> "skip"
-{-# INLINE skip #-}
-
--- | skipTo
+-- | skipToHz
 -- Gobbles up horizontal space then applies parser
-skipTo :: YP a -> YP a
-skipTo p = skip isSpace *> p
-{-# INLINE skipTo #-}
+skipToHz :: Yp a -> Yp a
+skipToHz = (*>) horizontalSpaces
+{-# INLINE skipToHz #-}
 
--- | skipTo1
+-- | skipToHz1
 -- same as skipTo but requires the occurance of atleast 1 horizonal space
-skipToHz1 :: YP a -> YP a
-skipToHz1 p = takeWhile1 isHorizontalSpace *> p
+skipToHz1 :: Yp a -> Yp a
+skipToHz1 = (*>) horizontalSpace1
 {-# INLINE skipToHz1 #-}
 
--- | skipToLn1
--- | sames as skipToLn but requiring atleast one whitespace occurance
-skipTo1 :: YP a -> YP a
-skipTo1 p = takeWhile1 isSpace *> p
-{-# INLINE skipTo1 #-}
 
 -- | Skip past input for as long as the predicate returns 'True'.
-skipWhile :: (Byte -> Bool) -> YP ()
+skipWhile :: (Byte -> Bool) -> Yp ()
 skipWhile p = go
  where
   go = do
     t <- BS.takeWhile p <$> getBuff
-    continue <- atleastBytesLeft (length t)
+    continue <- atleastBytesLeft $ length t
     when continue go
 {-# INLINE skipWhile #-}
 
-takeTill :: (Byte -> Bool) -> YP ByteString
+takeTill :: (Byte -> Bool) -> Yp ByteString
 takeTill p = takeWhile (not . p)
 {-# INLINE takeTill #-}
 
@@ -394,14 +349,14 @@ takeTill p = takeWhile (not . p)
 -- Note: /Backtracking is expensive/. The combinators is mostly to be used
 -- on single byte parsing predicates.
 --
--- Why the type @YP a -> YP ()@, instead of say
--- @(Word8 -> Bool) -> YP ()@ if its used primarily for matching on
+-- Why the type @Yp a -> Yp ()@, instead of say
+-- @(Word8 -> Bool) -> Yp ()@ if its used primarily for matching on
 -- single bytes? Occasionally we do need to match on a pair of bytes.
 --
 --
 -- End lines are sometimes not just a byte but a pair of bytes "\r\n" so
 -- we can pass in any parser ('void'-ing out result type if needed).
-followedBy :: YP a -> YP ()
+followedBy :: Yp a -> Yp ()
 followedBy p = YP $ \b e l s ->
   case parse (void p) e (bufferUnsafeDrop (position e) b) of
     Fail{}    -> l b e [] "followedBy"
@@ -410,14 +365,14 @@ followedBy p = YP $ \b e l s ->
                         (\b_ e_ -> l b_ e_ ["followedBy"] "followedBy")
                         b e
 
-takeWhile :: (Byte -> Bool) -> YP ByteString
+takeWhile :: (Byte -> Bool) -> Yp ByteString
 takeWhile p = do
     s <- BS.takeWhile p <$> getBuff
     continue <- atleastBytesLeft (length s)
     forkA continue (pure s) $ takeWhileAcc p s
 {-# INLINE takeWhile #-}
 
-takeWhile1 :: (Byte -> Bool) -> YP ByteString
+takeWhile1 :: (Byte -> Bool) -> Yp ByteString
 takeWhile1 p = do
   (`when` void demandInput) =<< endOfBuffer
   s <- BS.takeWhile p <$> getBuff
@@ -432,7 +387,7 @@ takeWhile1 p = do
     else fault "takeWhile1"
 {-# INLINE takeWhile1 #-}
 
-takeWhileAcc :: (Byte -> Bool) -> ByteString -> YP ByteString
+takeWhileAcc :: (Byte -> Bool) -> ByteString -> Yp ByteString
 takeWhileAcc p = go
   where go acc = do
           s <- BS.takeWhile p <$> getBuff
@@ -442,13 +397,13 @@ takeWhileAcc p = go
            else pure $ acc ++ s
 {-# INLINE takeWhileAcc #-}
 
-between :: YP o
+between :: Yp o
         -- ^ opening parser
-        -> YP c
+        -> Yp c
         -- ^ closing parser
-        -> YP a
+        -> Yp a
         -- ^ parser to satisfy inbetween
-        -> YP a
+        -> Yp a
 between op cp p = op *> skipTo p <* skipTo cp
 {-# INLINE between #-}
 
@@ -460,12 +415,12 @@ between op cp p = op *> skipTo p <* skipTo cp
 --       seperators.
 --
 -- Note: the parser must succeed atleast once (so "(p)" will pass but not "()").
-grouping :: YP a -> YP s -> YP (Seq.Seq a)
+grouping :: Yp a -> Yp s -> Yp (Seq.Seq a)
 grouping p v = between oParen cParen $ interleaved v p
   where interleaved s par = sepBy1Seq par (skipTo s <* spaces)
 
 -- | Match a specific string.
-string :: ByteString -> YP ByteString
+string :: ByteString -> Yp ByteString
 string bs = stringWithMorph id bs
 {-# INLINE string #-}
 
@@ -473,25 +428,25 @@ string bs = stringWithMorph id bs
 --
 -- Note: not efficent since it backtracks after every failure.
 -- Note: it matches in-order of list.
-oneOfStrings :: [ByteString] -> YP ByteString
+oneOfStrings :: [ByteString] -> Yp ByteString
 oneOfStrings [] = fault "oneOfStrings: passed empty list"
-oneOfStrings ls = Prelude.foldl1 (<|>) (fmap string ls)
+oneOfStrings ls = foldl1 (<|>) (fmap string ls)
 {-# INLINE oneOfStrings #-}
 
 -- | Satisfy a literal string, ignoring case.
 -- ASCII-specific but fast, oh yes.
-stringIgnoreCase :: ByteString -> YP ByteString
+stringIgnoreCase :: ByteString -> Yp ByteString
 stringIgnoreCase = stringWithMorph toLower
 {-# INLINE stringIgnoreCase #-}
 
 -- | To annotate
 stringWithMorph :: (ByteString -> ByteString)
-                -> ByteString -> YP ByteString
+                -> ByteString -> Yp ByteString
 stringWithMorph fn sn = string_ (stringSuspend fn) fn sn where
 
   string_ :: (forall r. ByteString -> ByteString -> Buffer -> Env
           -> Failure r -> Success ByteString r -> Result r)
-          -> (ByteString -> ByteString) -> ByteString -> YP ByteString
+          -> (ByteString -> ByteString) -> ByteString -> Yp ByteString
   string_ suspended f s0 = YP $ \b e l s ->
     let bs = f s0
         n = length bs
@@ -519,7 +474,7 @@ stringWithMorph fn sn = string_ (stringSuspend fn) fn sn where
 
 -- | Checks if there are atleast `n` bytes of buffer string left.
 -- Parse always succeeds
-atleastBytesLeft :: Int -> YP Bool
+atleastBytesLeft :: Int -> Yp Bool
 atleastBytesLeft i = YP $ \b e _ s ->
   let pos = position e + i in
   if pos < bufferLength b || more e == Complete
@@ -544,11 +499,11 @@ ensureSuspended n = runParser (demandInput >> go)
 
 -- | Immedidately demand more input via a 'Partial' continuation
 -- result.
-demandInput :: YP ByteString
+demandInput :: Yp ByteString
 demandInput = YP $ \b e l s ->
   case more e of
     Complete -> l b e [] "not enough input"
-    _        -> Partial $ \bs -> if null bs
+    _        -> Partial $ \bs -> if isEmpty bs
       then l b (e { more = Complete }) [] "not enough input"
       else s (bufferPappend b bs) (e { more = Incomplete }) bs
 {-# INLINE demandInput #-}
@@ -567,11 +522,11 @@ data T s = T {-# UNPACK #-} !Int s
 -- combinators such as 'Control.Applicative.many', because such
 -- parsers loop until a failure occurs.  Careless use will thus result
 -- in an infinite loop.
-scan :: s -> (s -> Byte -> Maybe s) -> YP ByteString
+scan :: s -> (s -> Byte -> Maybe s) -> Yp ByteString
 scan s0 p = scan_ id (\_ y -> pure y) p s0 <?> "scan"
 {-# INLINE scan #-}
 
-scanSt :: s -> (s -> Byte -> Maybe s) -> YP (s, ByteString)
+scanSt :: s -> (s -> Byte -> Maybe s) -> Yp (s, ByteString)
 scanSt s0 p = scan_ id (curry pure) p s0 <?> "scanSt"
 {-# INLINE scanSt #-}
 
@@ -584,13 +539,13 @@ scanSt s0 p = scan_ id (curry pure) p s0 <?> "scanSt"
 --
 scan_ :: (Byte -> Byte)
       -- ^ How to transform byte as scanning?
-      -> (s -> ByteString -> YP r)
+      -> (s -> ByteString -> Yp r)
       -- ^ Do what with the final state and parsed bytestring?
       -> (s -> Byte -> Maybe s)
       -- ^ State Transformation
       -> s
       -- ^ Initial state value
-      -> YP r
+      -> Yp r
 scan_ sft ret rho s0 = go "" s0 <?> "scan"
   where
     go acc s1 = do
@@ -635,7 +590,7 @@ data SLToken = EverythingOk
 -- Returns the content of the string without the quotation bytes.
 -- Careful as Haskell style strings differ from C style string literals
 -- THESE parse as C style
-stringLiteral :: YP ByteString
+stringLiteral :: Yp ByteString
 stringLiteral = do
   quote
   (s,b) <- getStringLiteralLines "" EverythingOk
@@ -646,7 +601,7 @@ stringLiteral = do
   <?> "string literal"
   where
     -- YARA spec says matches 'getStringLiteralLines'
-    getStringLiteralLines :: ByteString -> SLToken -> YP (SLToken, ByteString)
+    getStringLiteralLines :: ByteString -> SLToken -> Yp (SLToken, ByteString)
     getStringLiteralLines acc EverythingOk = do
        (st,bs) <- scanSt EverythingOk rho
        let acc_ = acc ++ bs
@@ -669,7 +624,7 @@ stringLiteral = do
     rho s b             = if
       ---if new line and escaping return nothing
       --if quote then return Nothing
-      
+
         | b == 10 && s /= Escaping -> Just NewLine
         -- Escaped whitespace
         | s == Escaping && isHorizontalSpace b ->
@@ -697,7 +652,7 @@ Everything saved just in case.
 {-
 -- | If at least @n@ elements of input are available, return the
 -- current input, otherwise fail.
-ensure :: Int -> YP ByteString
+ensure :: Int -> Yp ByteString
 ensure n = (YP $ \b e l s ->
     let pos = position e in
     if bufferLengthAtLeast pos n b
@@ -710,20 +665,20 @@ ensure n = (YP $ \b e l s ->
 
 
 ---- | Match on of a specific list of strings
---strings :: Foldable f => f ByteString -> YP ByteString
+--strings :: Foldable f => f ByteString -> Yp ByteString
 --strings = foldMap string
 --{-# INLINE strings #-}
 --{-# SPECIALIZE strings :: Seq.Seq ByteString -> YP ByteString #-}
---{-# SPECIALIZE strings :: [ByteString] -> YP ByteString #-}
+--{-# SPECIALIZE strings :: [ByteString] -> Yp ByteString #-}
 
 
 
 --sepByByte :: Semigroup a
---             => Byte -> YP a -> YP b -> YP (a,b)
+--             => Byte -> Yp a -> Yp b -> Yp (a,b)
 --sepByByte b q p = pair (q <* space1 <* byte b <* space1) p
 
 
-untuple :: (YP a, YP b) -> YP (a,b)
+untuple :: (Yp a, Yp b) -> Yp (a,b)
 untuple (u,v) = pair u Nothing v <?> "untuples"
 {-# INLINE untuple #-}
 
@@ -731,20 +686,20 @@ untuple (u,v) = pair u Nothing v <?> "untuples"
 
 sepByw :: Default (f a)
       => (a -> f a -> f a)
-      -> YP a
-      -> YP s
-      -> YP (f a)
+      -> Yp a
+      -> Yp s
+      -> Yp (f a)
 sepByw f p s = liftA2 f p ((s *> sepByw1 f p s) <|> def) <|> def
 {-# INLINE sepByw #-}
 
 sepByw1 :: Default (f a)
         => (a -> f a -> f a)
-        -> YP a
-        -> YP s
-        -> YP (f a)
+        -> Yp a
+        -> Yp s
+        -> Yp (f a)
 sepByw1 f p s = let go = liftA2 f p ((s *> go) `mplus` def) in go
-{-# SPECIALIZE sepByw1 :: (a -> Set.Set a -> Set.Set a) -> YP a
-                                  -> YP s -> YP (Set.Set a) #-}
+{-# SPECIALIZE sepByw1 :: (a -> Set.Set a -> Set.Set a) -> Yp a
+                                  -> Yp s -> Yp (Set.Set a) #-}
 {-# INLINE sepByw1 #-}
 
 
@@ -755,14 +710,14 @@ sepByw1 f p s = let go = liftA2 f p ((s *> go) `mplus` def) in go
 -- Strings can contain the following escape bytes \" \\ \t \n \r and handle
 -- string line breaks.
 -- Returns the content of the string without the quotation bytes.
-litString :: YP ByteString
+litString :: Yp ByteString
 litString = quote *> (go "") <* quote <?> "litString"
   where
     -- s - stores previous char
     go s w
       -- If quote, not preceeded by backslash, the string is closed.
       | s /= 92 && w == 34   = Nothing
-      -- Quote, preceeded by backslash is cool. 
+      -- Quote, preceeded by backslash is cool.
       | s == 92 && w == 34   = Just w
 
       | s == 92 && (isSpace w || isNewline w)  = Just ~~tricky
@@ -868,7 +823,7 @@ litString = quote *> (go "") <* quote <?> "litString"
 -- pred, then the parser fails.
 --
 -- Must consume atleast /one/ eventhough the parser name is not followed by a '1'.
-takeNWhile :: Int -> (Word8 -> Bool) -> YP ByteString
+takeNWhile :: Int -> (Word8 -> Bool) -> Yp ByteString
 takeNWhile n p = do
   (`when` demandInput) =<< endOfBuffer
   s <- BS.takeWhile p <$> getBuff
@@ -878,7 +833,7 @@ takeNWhile n p = do
     else return s
 {-# INLINE takeNWhile #-}
 
-inputSpansChunks :: Int -> YP Bool
+inputSpansChunks :: Int -> Yp Bool
 inputSpansChunks i = YP $ \_ t pos_ more _lose suc ->
   -- take position and find end of chunk
   let pos = pos_ + Pos i
@@ -895,13 +850,13 @@ inputSpansChunks i = YP $ \_ t pos_ more _lose suc ->
 
 
 
- 
+
 
 -- Is point-free style ever slower or faster
 -- or does ghc optimize it all equivalently?
 -- option = (flip (<|>)) . pure
 -- perhaps = (option Nothing) . (Just <$>)
-option :: a -> YP a -> YP a
+option :: a -> Yp a -> Yp a
 option x p = p <|> pure x <?> "option"
 {-# INLINE option #-}
 
@@ -910,29 +865,41 @@ option x p = p <|> pure x <?> "option"
 
 -- | Match either a single newline character @\'\\n\'@, or a carriage
 -- return followed by a newline character @\"\\r\\n\"@.
-endOfLine :: YP ()
+endOfLine :: Yp ()
 endOfLine = void (byte 10) <|> void (string "\r\n")
 
 
 
-alphaNum :: YP Byte
+alphaNum :: Yp Byte
 alphaNum = satisfy isAlphaNum  <?> "alphaNum"
 {-# INLINE alphaNum #-}
 
-space :: YP Byte
+space :: Yp Byte
 space = satisfy isSpace <?> "space"
 {-# INLINE space #-}
 
-spaces :: YP ByteString
+spaces :: Yp ByteString
 spaces = takeWhile isSpace <?> "spaces"
 {-# INLINE spaces #-}
 
-space1 :: YP ByteString
+space1 :: Yp ByteString
 space1 = takeWhile1 isSpace <?> "space1"
 {-# INLINE space1 #-}
 
 
-horizontalSpace :: YP Byte
+horizontalSpace :: Yp Byte
 horizontalSpace = satisfy isHorizontalSpace <?> "horizontalSpace"
 {-# INLINE horizontalSpace #-}
+-}
+
+
+{-
+-- | Peek at the next 'N' number of bytes
+peekNBytes :: Word -> Yp ByteString
+peekNBytes n = YP $ \b e l s ->
+  let pos = position e
+  in if bufferLengthAtLeast pos n b
+       then s b e (bufferSubstring (fromIntegral pos) n b)
+       else ensureSuspended 1 b e l (\b_ e_ bs_ -> s b_ e_ $! unsafeHead bs_)
+{-# INLINE peekNBytes #-}
 -}

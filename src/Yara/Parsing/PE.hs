@@ -1,4 +1,4 @@
-
+{-# LANGUAGE NoImplicitPrelude #-}
 -- |
 -- Module      :  Text.Yara.Parsing.PE
 -- Copyright   :  David Heras 2018-2019
@@ -12,10 +12,11 @@
 --
 module Text.Yara.Parsing.PE where
 
+import Yara.Prelude
 
 
 
-numberOfSections :: YP _
+numberOfSections :: Yp _
 numberOfSections = do
   string "number_of_sections"
   spaces
@@ -24,7 +25,7 @@ numberOfSections = do
   i <- decimal
   _ doSomething i
 
-exports :: YP _
+exports :: Yp _
 exports = do
   string "exports"
   spaces
@@ -35,9 +36,9 @@ exports = do
   closeParen
   _ doSomething i
 
-dll :: YP _
+dll :: Yp _
 dll = do
   string "DLL"
   _
 
-characteristics :: YP _
+characteristics :: Yp _

@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE PatternGuards #-}
 -- |
 -- Module      :  Yara.Parsing.Glob
@@ -28,12 +29,11 @@
 -- tailored to our needs by using ByteStrings natively and removing superfluous -- (for us) monad transforms support.
 module Yara.Parsing.Glob where
 
-import Prelude hiding (FilePath, (++), null, head)
+import Yara.Prelude
+
 import Data.ByteString hiding (elem)
 import Text.Regex.Posix ((=~~))
 import qualified Data.Sequence as Seq
-    -----
-import Yara.Shared
 
 glob :: ByteString -> IO (Seq.Seq FilePath)
 glob = undefined -- =~~ undefined

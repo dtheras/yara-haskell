@@ -1,5 +1,6 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedStrings #-}
 -- |
 -- Module      :  Yara.Parsing.Args
 -- Copyright   :  David Heras 2018-2019
@@ -12,24 +13,26 @@
 -- Parse and handle command line arguments
 --
 module Yara.Parsing.Args (
+
     parseArgs  --  :: [ByteString] -> Result Env
   , showHelp   --  :: ByteString
+
   ) where
 
-import Prelude hiding ((++), takeWhile, reverse, all, unlines, unwords,
-                       head, take, drop, concat, splitAt)
+import Yara.Prelude
+import Yara.Parsing.Combinators
+import Yara.Parsing.Parser
+import Yara.Parsing.Rules
+import Yara.Parsing.Types
+
 import Data.ByteString hiding (takeWhile, elem, length)
 import qualified Data.ByteString as B (length)
 import Data.ByteString.Char8 (unlines, unwords)
 import qualified Data.Map.Strict as Map
 import Data.Sequence ((<|))
 import Control.Monad.State.Strict
-    -----
-import Yara.Parsing.Combinators
-import Yara.Parsing.Parser
-import Yara.Parsing.Rules
-import Yara.Parsing.Types
-import Yara.Shared
+
+
 
 -- Doesn't accept non-visible characters for Windows or Posix
 -- Windows excludes:  <  >  :  "  /  \  |  ?  *
@@ -41,12 +44,12 @@ badFilepathByte w = not $ if onWindows
   else w - 33 <= 58 || w - 93 <= 33
 {-# INLINE badFilepathByte #-}
 {-
-filepathQuoted :: YP ByteString
+filepathQuoted :: Yp ByteString
 filepathQuoted = quotedStringWith badFilepathByte
       | w == 42 && not b   = Just True  -- if escaped wildcard, keep going
 {-# INLINE filepathQuoted #-}
 -}
-filepathUnquoted :: YP ByteString
+filepathUnquoted :: Yp ByteString
 filepathUnquoted = do
   fp <- scan False $ \b w -> if
       | badFilepathByte w  -> Nothing    -- if not fp char, done
@@ -65,7 +68,7 @@ filepathUnquoted = do
 -- | `filepath` parses filepath passed into the command line, either style
 --  quoted style:    $ prog --flag="some/random filepath"
 --  unquoted style:  $ prog --flag=some/random\ filepath
-filepath :: YP ByteString
+filepath :: Yp ByteString
 filepath = filepathQuoted <|> filepathUnquoted
 {-# INLINE filepath #-}
 -}
@@ -73,7 +76,7 @@ filepath = filepathQuoted <|> filepathUnquoted
 
 
 -- Return the next command line argument.
-getArg :: YP ByteString
+getArg :: Yp ByteString
 getArg = do
   spaces
   arg <- scan False p
@@ -107,9 +110,9 @@ showArgs = Map.foldlWithKey go "" args
                   (Arg2 h l m _) -> ("--" ++ d ++ "=" ++ l ++ "=" ++ m, h)
 {-# INLINE showArgs #-}
 
-data ArgN = Arg0 ByteString             (YP ())
-          | Arg1 ByteString Label       (ByteString -> YP ())
-          | Arg2 ByteString Label Label (ByteString -> ByteString -> YP ())
+data ArgN = Arg0 ByteString             (Yp ())
+          | Arg1 ByteString Label       (ByteString -> Yp ())
+          | Arg2 ByteString Label Label (ByteString -> ByteString -> Yp ())
 
 -- Helps reability by avoiding (visible) tuple nesting
 (=?) :: a -> b -> (a,b)
@@ -181,12 +184,12 @@ args = Map.fromList [
     badIdenChars :: ByteString
     badIdenChars = "yara: indentifier contains exlcuded chars"
 
-unknownFlag :: ByteString -> YP a
+unknownFlag :: ByteString -> Yp a
 unknownFlag bs = fault $ "unknown option '" ++ bs ++ "'"
 {-# INLINE unknownFlag #-}
 
 -- | Parse a single flag.
-parseSingleFlag :: YP ()
+parseSingleFlag :: Yp ()
 parseSingleFlag = do
   -- Since command line arguments are stored in the parser
   -- buffer, we pull the next character
@@ -211,7 +214,7 @@ parseSingleFlag = do
 
 -- | Parse a double flag
 -- The line argument is passed in with the "--" already stripped
-parseDoubleFlag :: ByteString -> YP ()
+parseDoubleFlag :: ByteString -> Yp ()
 parseDoubleFlag bs =
   let (_,bs') = splitAt 2 bs
       (h:hs) = split 61 bs'
@@ -227,7 +230,7 @@ parseDoubleFlag bs =
     queryDoubleFlag w = Map.lookup w $ Map.mapKeysMonotonic snd args
 
 -- | parseArgs_ actually handles the command line arguments
-parseArgs_ :: YP Env
+parseArgs_ :: Yp Env
 parseArgs_ = do
   w <- getArg
   if | argIsLong w   -> parseDoubleFlag w *> parseArgs_
@@ -245,7 +248,7 @@ parseArgs bs = parse_ parseArgs_ $ unwords bs
 
 
 {-
-data OPT = 
+data OPT =
     OPT_STRING_MULTI Byte ByteString [ByteString] ([ByteString] -> Parser ())
   | OPT_STRING       Byte ByteString  ByteString  ( ByteString  -> Parser ())
   | OPT_INTEGER      Byte ByteString  ByteString  ( ByteString  -> Parser ())
@@ -259,7 +262,7 @@ data OPT =
 -- Parse an unquoted-style filepath passed into the command line
 -- No size limit is imposed.
 -- Loaded with errors.
-filepath :: YP ByteString
+filepath :: Yp ByteString
 filepath = go ""
   where
     go acc = do
@@ -297,7 +300,7 @@ filepath = go ""
 --    span' bs = mapSnd (drop 1) $ span (/= bs)
 --               where mapSnd f (x,y) = (x, f y)
 
---  splitAtEqs :: YP [ByteString]
+--  splitAtEqs :: Yp [ByteString]
 --  splitAtEqs bs = parse (sepBy1 (word8 61) (takeWhile (/=61))) defaultEnv bs
 
 

@@ -1,7 +1,8 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedStrings #-}
 -- |
 -- Module      :  Yara.Parsing.Rules
 -- Copyright   :  David Heras 2018-2019
@@ -18,59 +19,26 @@ based on LibZip
 This is a binding to C library libzip.-}
 module Yara.Parsing.Rules where
 
-import Prelude hiding ((++), takeWhile, unlines, quot, sequence, null,
-                       unwords, putStrLn, replicate, replicate, head,
-                       FilePath, span, all, take, drop, concat, length)
-import Data.ByteString hiding (foldl1, foldl, foldr1, putStrLn,
-                               zip, map, replicate, takeWhile, empty,
-                               elem, count, tail, unpack, pack)
-import Control.Monad.Reader
-import Data.Default
+import Yara.Prelude
+import Yara.Parsing.Combinators
+import Yara.Parsing.Conditions
+import Yara.Parsing.Parser
+import Yara.Parsing.Strings
+import Yara.Parsing.Types
+import Yara.Parsing.Hash
+
 import Text.Regex.Posix.Wrap
 import Text.Regex.Posix ()
     -----
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence   as Seq
 import qualified Data.Set        as Set
-    -----
-import Yara.Parsing.Combinators
-import Yara.Parsing.Parser
-import Yara.Parsing.Types
-import Yara.Parsing.Hash
-import Yara.Shared
+
+
 
 import Debug.Trace
 
-data Comment = MultiLineComment ByteString
-             | SingleLineComment ByteString
 
--- | @comment@ parses either a single-line or multi-line
---
--- YARA rules can be comment just as if a C source file
--- >
--- > /*
--- >    This is a multi-line comment ...
--- > */
--- >
--- > // ... and this is single-line comment
---
--- Returns the just the comment contents
-comment :: YP Comment
-comment = do -- Double Line
-  string "/*"
-  bs <- scan False $ \s b -> if
-      | b == 42       -> Just True  -- If '*', set 's' to 'True'
-      | b == 47 && s  -> Nothing    -- If '/' following a '*', end scan
-      | otherwise     -> Just False -- Else, set 's' to False
-  {- With how 'scan' is written, we will have the need to strip a '*'
-     off the end. Thankfully ByteStrings allow O(1) 'unsnoc'.         -}
-  pure $ MultiLineComment $ maybe "" fst $ unsnoc bs
-  <|>     do -- Singe Line
-  string "--"
-  -- scan until a new line byte is found ('\n' or '\r')
-  bs <- scan () $ \_ b -> if b == 10 || b == 13 then Nothing else Just ()
-  pure $ SingleLineComment bs
-{-# INLINE comment #-}
 {- Would is be possible to write something allong the lines of:
 
 parseRules :: ______
@@ -79,7 +47,7 @@ parseRules = handleComments $ do
   ...
   parserN
 
-handleComments :: YP a -> YP a
+handleComments :: Yp a -> Yp a
 handleComments p = case runParser p of
   sucessfill -> then sucessful
   fail       -> do
@@ -95,11 +63,11 @@ badModule i = fault $ "'" ++ i ++ "' is not an imported module"
 --data ConditionOperator a =
   --MkHash :: Hash -> ConditionOperator Hash
  -- MkFile ::
-bool :: YP Bool
+bool :: Yp Bool
 bool = (string "false" $> False) <|> (string "true" $> True) <?> "bool"
 {-# INLINE bool #-}
 
-value :: YP Value
+value :: Yp Value
 value = (ValueBool <$> bool) <|> {-ValueS <$> quotedString,-}
         (ValueInteger <$> decimal)
 {-# INLINE value #-}
@@ -126,7 +94,7 @@ isKeyword = flip Set.member yaraKeywords
 
 -- possibly temporary. does the parsing of an identifier
 -- but doesnt check if imported. very helpful.
-_identifier :: YP ByteString
+_identifier :: Yp ByteString
 _identifier = do
   -- must start with underscore or letter
   w <- satisfy isLeadingByte
@@ -165,7 +133,7 @@ _identifier = do
 --
 -- We additionally imposed that identifiers cannot be a single number or
 -- just an underscore for the time being, due to parsing issues.
-identifier :: YP ByteString
+identifier :: Yp ByteString
 identifier = do
   i <- _identifier
   b <- isDot <$> peekByte
@@ -183,7 +151,7 @@ identifier = do
 
 -- | Parse an identifier that doesn't/isn't "imported," ie. is not module name
 -- trailed by a '.' trailed by an identifier
-identifierNoImport :: YP ByteString
+identifierNoImport :: Yp ByteString
 identifierNoImport = do
   l <- _identifier
   s <- getStrings
@@ -194,7 +162,7 @@ identifierNoImport = do
 
 -- | Parse an identifier preceeded by a '$'
 -- Returns only the identifier.
-label :: YP ByteString
+label :: Yp ByteString
 label = liftA2 seq dollarSign identifierNoImport
 {-# INLINE label #-}
 
@@ -209,7 +177,7 @@ label = liftA2 seq dollarSign identifierNoImport
 -- labelWOImport -> idenitifers that are preceeded by a '$'
 
 
-ruleType :: YP RuleType
+ruleType :: Yp RuleType
 ruleType = do
   spaces
   b <- peekByte
@@ -240,57 +208,30 @@ ruleType = do
 {-# INLINE ruleType #-}
 
 
+-- | 'lineSeperated' is a parser that allows a compact way of consuming white
+-- space but ensuring atleast 1 newline character is parsed. It continues to parse
+-- any further whitespace (including more newlines).
+lineSeperated :: Yp ()
+lineSeperated = do
+  horizontalSpace  -- Parse remainder of any of current lines whitespace
+  newLine          -- Parse atleast one newline token
+  void $ spaces    -- Eatup any further whitespace
+
+-- | 'seekOnNewLine' applies a 'lineSeperated'
+seekOnNewLine :: Yp a -> Yp a
+seekOnNewLine = (*>) lineSeperated
+
 
 -- type Metadata = Map.Map Identifier Value
-parseMetadatum :: YP Metadatum
+-- | Parses the metadata of a yara rule.
+--
+-- Simple parser since metadata are just paired labels and a string.
+parseMetadatum :: Yp Metadatum
 parseMetadatum = do
-  -- Preceeded by the keyword "meta"
   skipTo $ string "meta:"
-  -- First meta
-  seekFirstMetadataLn
-  sepByMap (pair identifier (Just $ space1 *> eq *> space1) value)  space1
+  seekOnNewLine $ sepByMap aMetadata lineSeperated
   where
-    seekFirstMetadataLn = do
-      horizontalSpace
-      endOfLine
-      spaces
-      <?> ""
-
-
-
-
-
-
-{-- |
---
---
--- 2.3.9 Anonymous strings
-sss :: YP Metadata
-sss = do
-  skipTo $ string "strings:"
-  space1
-  sepByMap (pair label value) space1
-  where
-    aux = do
-      dollarSign
-      label
-      spaces *> eq *> spaces
--}
-
--- | Parse a regex string -- Text.Regex.TDFA
-regex :: YP (ByteString -> ByteString)
-regex = do
-  -- Opens with a forward slash '/'
-  fSlash
-  -- Scan source until unescaped forward slash '/' is encountered
-  rx <- scan False p
-  return $ (rx =~)
-  <?> "error building regex map"
-  where p s w | s && w /= 47  = Nothing
-              | w == 47       = Just True
-              | otherwise     = Just False
-
-
+    aMetaData = pair identifier (Just $ skipToHz eq) (skipToHz value)
 
 
 
@@ -300,18 +241,18 @@ regex = do
 
 -- | 'parseCondition' is the main function that parses a conditional line in a
 -- YARA rules file
-parseConditions :: YP ConditionalExp
+parseConditions :: Yp ConditionalExp
 parseConditions = undefined
 
 
-parseACondition :: YP ConditionalExp
+parseACondition :: Yp ConditionalExp
 parseACondition = undefined
 
 
 
 --- horribly inefficent because if it gets to the  "and" and finds a "r"
--- itll restart from the begining of the parser 
-and :: YP ConditionalExp
+-- itll restart from the begining of the parser
+and :: Yp ConditionalExp
 and = do
   c1 <- condition
   horizontalSpaces
@@ -323,7 +264,7 @@ and = do
     else
      return $ And c1 c2
 
-condition :: YP ConditionalExp
+condition :: Yp ConditionalExp
 condition = do
   b <- peekByte
   if b == 40       -- if '('
@@ -337,13 +278,13 @@ condition = do
 -- | YARA specification allows offsets to be written in hexadecimal with
 -- prefix '0x' (we allow '0X' as well) as its handy when writing
 -- virtual addresses.
-offset :: YP Word
+offset :: Yp Word
 offset = decimal <|> hexadecimal
 {-# INLINE offset #-}
 
 
 -- | DONE 2.3.1 Counting strings
-stringCount :: YP ConditionalExp
+stringCount :: Yp ConditionalExp
 stringCount = do
   byte 35          -- For counting occurences of strings, identifiers are
   i <- identifier  -- preceeded by a '#' rather than the normal '$'
@@ -359,13 +300,13 @@ stringCount = do
 -- by using @a[i]. The indexes are one-based, so the first occurrence would
 -- be @a[1] the second one @a[2] and so on. If you provide an index greater
 -- then the number of occurrences of the string, the result will be a Nothing.
-offsetOf :: YP ConditionalExp
+offsetOf :: Yp ConditionalExp
 offsetOf =
   liftA2 Offset (identifier <* sqBra <* spaces) (offset <* spaces <* sqKet)
 {-# INLINE offsetOf #-}
 
 -- DONE 2.3.2
-stringInAt :: YP ConditionalExp
+stringInAt :: Yp ConditionalExp
 stringInAt = do
   i <- label
   horizontalSpaces
@@ -412,7 +353,7 @@ stringInAt = do
 -- contains the string “dummy2” and satisfies Rule1. Note that it is strictly
 -- necessary to define the rule being invoked before the one that will make
 -- the invocation.
-ruleRef :: YP ConditionalExp
+ruleRef :: Yp ConditionalExp
 ruleRef = do
   -- Why '_identifier' instead of 'identifier'?
   -- Need to avoid the check that it is in the strings (its empty anyways).
@@ -446,7 +387,7 @@ ruleRef = do
 -- Note: this is distinct from the "filesize" keyword, which gets replaced with
 -- the value of the file-being-scanned's digital size.
 --
-conditionFilesize :: YP ConditionalExp
+conditionFilesize :: Yp ConditionalExp
 conditionFilesize  = do
   string "filesize"
   spaces          -- 0 or more horizontal spaces is OK
@@ -473,7 +414,7 @@ data SetOfStrings
   | AnyOfStrings
   | OfStrings Word
 
-conditionSetOfStrings :: YP ConditionalExp
+conditionSetOfStrings :: Yp ConditionalExp
 conditionSetOfStrings = do
   _ <- string "all" $> All
          <|> string "any" $> Any
@@ -483,7 +424,7 @@ conditionSetOfStrings = do
   spaces
   --_ <- (grouping (label <|> regex) comma)
    --    (string "them") <|>
-  fault "" 
+  fault ""
 
 
 
@@ -491,7 +432,7 @@ conditionSetOfStrings = do
 
 allconditions = ruleRel <|> conditionFilesize <|> conditionSetOfStrings
 {-
-_and :: YP Condition
+_and :: Yp Condition
 _and = do
   m <- subCondition
   spaces
@@ -516,8 +457,8 @@ _and = do
 {-
 block :: (a -> f a -> f a)
       -> ByteString
-      -> YP a
-      -> YP (f a)
+      -> Yp a
+      -> Yp (f a)
 block s p = do
   string s <* colon
   skipTo $ sepBy p space1
@@ -527,7 +468,7 @@ block s p = do
 
 
 {-
-strModifiers :: YP
+strModifiers :: Yp
 strModifiers = do
   skipTo $ perhaps "xor"
   sepBy1Set space1 $ foldMap string ["ascii", "fullword", "nocase", "wide"]
@@ -543,7 +484,7 @@ strModifiers = do
 --    - metadata block
 --    - strings block
 --    - conditions block (depends on the strings block)
-parseRuleBlock :: YP ()
+parseRuleBlock :: Yp ()
 parseRuleBlock = do
   oCurl
   meta <- parseMetadata keep_meta
@@ -556,12 +497,12 @@ parseRuleBlock = do
 
 -- HEX
 
-hexPr :: YP HexTokens
+hexPr :: Yp HexTokens
 hexPr = Seq.singleton . uncurry Pair <$> (hexDigit `pair` hexDigit)
      where hexDigit = satisfy $ \w -> w == 63 || w - 48 <=  9
                               || w - 97 <= 25 || w - 65 <= 25
 
-hexJump :: YP HexTokens
+hexJump :: Yp HexTokens
 hexJump = between sqBra sqKet $ do
   l <- optional decimal
   flank space dash
@@ -572,7 +513,7 @@ hexJump = between sqBra sqKet $ do
     | isNothing u                 -> IJmp <$> l
     | otherwise                   -> uncurry RJmp <$> untuple (l,u)
 
-hex :: YP HexStr
+hex :: Yp HexStr
 hex = between oCurl cCurl $ sepBy1 (hexGrp <|> hexStd) space1
   where
     hexAux = Seq.fromList <$> sepBy1 (hexPr <|> hexJump) space1
@@ -581,7 +522,7 @@ hex = between oCurl cCurl $ sepBy1 (hexGrp <|> hexStd) space1
 
 -- PARSE YARA STRING
 
-patterns :: YP YaraStr
+patterns :: Yp YaraStr
 patterns = do
   l <- label
   skipTo eq
@@ -599,7 +540,7 @@ patterns = do
     scan = foldl (|>) empty <$> scan' -- change to a sequence
 
 
-parseConditions :: YP ()--[(ByteString,Pattern)]->Parser[ByteString->Bool]
+parseConditions :: Yp ()--[(ByteString,Pattern)]->Parser[ByteString->Bool]
 parseConditions = do
   string "condition:"
   skipSpace
@@ -626,7 +567,7 @@ main =
 
 
 {-}
-range :: YP (Word64, Word64)
+range :: Yp (Word64, Word64)
 range = do
   openParen
   spaces
@@ -656,7 +597,7 @@ range = do
 --               | }
 --
 --
-ruleBlock :: YP ByteString
+ruleBlock :: Yp ByteString
 ruleBlock = do
   spaces
   r <- ruleType

@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
 -- |
 -- Module      :  Text.Yara.Parsing.Elf
@@ -12,11 +13,11 @@
 --
 module Yara.Parsing.Elf where
 
-import Prelude hiding (FilePath)
+import Yara.Prelude hiding (unpack)
+
 import Data.ByteString.Char8 (unpack)
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString as S
-import Yara.Shared
 
 elfMagic :: S.ByteString
 elfMagic = "\DELELF"

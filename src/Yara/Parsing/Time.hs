@@ -1,4 +1,4 @@
-
+{-# LANGUAGE NoImplicitPrelude #-}
 -- |
 -- Module      :  Text.Yara.Parsing.Time
 -- Copyright   :  David Heras 2018-2019
@@ -10,4 +10,6 @@
 --
 -- Time-related functions module.
 module Text.Yara.Parsing.Time where
+
+import Yara.Prelude
 
