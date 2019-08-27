@@ -6,6 +6,7 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE Rank2Types #-}
+{-# LANGUAGE TupleSections #-}
 #ifdef hlint
 {-# ANN module "HLint: ignore Eta reduce" #-}
 #endif
@@ -23,6 +24,7 @@
 module Yara.Parsing.Combinators where
 
 import Yara.Prelude
+import Yara.Parsing.AST
 import Yara.Parsing.Buffer
 import Yara.Parsing.Parser
 
@@ -40,12 +42,11 @@ import Foreign hiding (void)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence   as Seq
 import qualified Data.Set        as Set
-
-
-
-
 --- GHC.IO.Buffer
 
+
+-- -----------------------------------------------------------------------------
+-- Fundamental Parsers
 
 
 instance (a ~ ByteString) => IsString (Yp a) where
@@ -56,6 +57,37 @@ getBuff :: Yp ByteString
 getBuff = YP $ \b e _ s -> s b e (bufferUnsafeDrop (position e) b)
 {-# INLINE getBuff #-}
 
+-- | Peek at next byte.
+--
+-- Note: Doesn't fail unless at the end of input.
+peekByte :: Yp Byte
+peekByte = YP $ \b e l s ->
+  let pos = position e in
+  if bufferLengthAtLeast pos 1 b
+    then s b e (bufferUnsafeIndex b pos)
+    else ensureSuspended 1 b e l (\b_ e_ bs_ -> (s b_ e_ $! unsafeHead bs_))
+{-# INLINE peekByte #-}
+
+satisfy :: (Byte -> Bool) -> Yp Byte
+satisfy p = do
+  h <- peekByte
+  if p h
+    then advance 1 $> h
+    else fault_ "satisfy"
+{-# INLINE satisfy #-}
+
+-- | Match a specific byte.
+byte :: Byte -> Yp Byte
+byte c = satisfy (== c)
+         <?> sig c
+{-# INLINE byte #-}
+
+-- | Match any byte except the given one.
+notByte :: Byte -> Yp Byte
+notByte c = satisfy (/= c)
+            <?> "not '" +> c ++ "'"
+{-# INLINE notByte #-}
+
 -- | Get next byte.
 nextByte :: Yp Byte
 nextByte = satisfy $ const True
@@ -63,17 +95,48 @@ nextByte = satisfy $ const True
 
 -- | Return 'True' if buffer is empty
 endOfBuffer :: Yp Bool
-endOfBuffer = liftA2 (==) getPos (YP $ \b@(Buf _ _ l _ _) e _ s ->
-                                    let p = position e
-                                    in s b e $ assert (p >= 0 && p <= l) (l-p))
+endOfBuffer = liftA2 (==) getPos retBufLength
+  where retBufLength = YP $ \b@(Buf _ _ l _ _) e _ s ->
+          let p = position e
+          in s b e $ assert (p >= 0 && p <= l) (l-p)
 {-# INLINE endOfBuffer #-}
+ {-YP $ \b@(Buf _ _ l _ _) e _ s ->
+  let p = position e
+  in
+
+
+  liftA2 (==) do
+   p <- getPos
+   l <- retBufLength
+   pure 
+  where retBufLength = YP $ \b@(Buf _ _ l _ _) e _ s ->
+          let p = position e
+          in s b e $ assert (p >= 0 && p <= l) (l-p)-}
+
+
+#define GO(func,pred) func :: Byte -> Bool; func = pred; {-# INLINE func #-}
+GO(isDot,(==46))
+GO(isEqual, (==61))
+GO(isAlpha,\b -> b - 65 < 26 || b - 97 < 26)
+-- | A fast digit predicate.
+GO(isDigit,\b -> b - 48 <= 9)
+GO(isAlphaNum, isDigit <> isAlpha)
+GO(isSpace, \b -> b == 32 || b - 9 <= 4)
+-- | A predicate that matches either a carriage return @\'\\r\'@ or
+-- newline @\'\\n\'@ character.
+GO(isEndOfLine, (== 13) <> (== 10))
+-- | A predicate that matches either a space @\' \'@ or horizontal tab
+-- @\'\\t\'@ character.
+GO(isHorizontalSpace, (== 32) <> (== 9))
+#undef GO
+
 
 -- | This parser always succeeds.  It returns 'True' if the end
 -- of all input has been reached, and 'False' if any input is available
 atEnd :: Yp Bool
 atEnd = YP $ \b e _ s ->
   if | position e < bufferLength b  -> s b e True
-     | more e == Complete           -> s b e False
+     | more e == False              -> s b e False
      | otherwise                    -> prompt (\b_ e_ -> s b_ e_ False)
                                               (\b_ e_ -> s b_ e_ True)
                                               b e
@@ -82,11 +145,10 @@ atEnd = YP $ \b e _ s ->
 -- | Match only if all input has been consumed.
 endOfInput :: Yp ()
 endOfInput = YP $ \b e l s ->
-  if | position e < bufferLength b  -> l b e [] "endOfInput"
-     | more e == Complete           -> s b e ()
-     | otherwise        -> runParser demandInput b e
-                                     (\b_ e_ _ _ -> l b_ e_ [] "endOfInput")
-                                     (\b_ e_ _   -> s b_ e_ ())
+  if | position e < bufferLength b  -> l b e "end-of-input" EndOfInput
+     | more e == False              -> s b e ()
+     | otherwise  -> runParser demandInput b e (failure EndOfInput "endOfInput")
+                                               (\b_ e_ _   -> s b_ e_ ())
 {-# INLINE endOfInput #-}
 
 --- UTILITY PARSERS
@@ -202,66 +264,39 @@ CP(vertBar,124)
 CP(cCurly,125)
 #undef CP
 
--- Ensure that a '<' or '>'  token is followed by any byte
--- except '=' (otherwise token is '<=' or '>=' token)
-notFollowedByEq :: Yp ()
-notFollowedByEq = do
-  b <- peekByte
-  if isEqual b
-    then fault "YARA spec doesn't permit the use of operators '<=' and '>=' "
-    else pure () -- otherwise
-{-# INLINE notFollowedByEq #-}
-
-#define DP(name,p1,p2,val) name = p1 *> p2 $> val; {-# INLINE name #-}
-DP(lessthan,lt,notFollowedByEq,LT)
-DP(eqeq,eq,eq,EQ)
-DP(greaterthan,gt,notFollowedByEq,GT)
-DP(ellipsis,dot,dot,())
-#undef DP
-
-ordering :: Yp Ordering
-ordering = lessthan <|> eqeq <|> greaterthan <?> "ordering"
+ordering :: Yp LinearOrder
+ordering = do
+  (b1,b2) <- peekBytes2
+  case (b1,b2) of
+    (61,61) -> ret 2 Equal
+    (60,61) -> ret 2 LessThanOrEqual
+    (62,61) -> ret 2 GreaterThanOrEqual
+    (60,_)  -> ret 1 LessThan
+    (61,_)  -> ret 1 GreaterThan
+    _       -> fault_ "ordering"
+  <?> "ordering"
+  where
+    ret a b = advance a $> b
+    -- Peek at the next 2 bytes in the buffer. Does not consume input.
+    peekBytes2 :: Yp (Byte,Byte)
+    peekBytes2 =  YP $ \b e l s ->
+      let pos = position e
+      in if bufferLengthAtLeast pos 2 b
+       then s b e (bufferUnsafeIndex b pos, bufferUnsafeIndex b (pos+1))
+       else ensureSuspended 2 b e l (\b_ e_ bs_ -> s b_ e_ $! unsafeHead2 bs_)
+    -- unsafe-head the first two bytes of a bytestring and return them
+    -- as a pair.
+    unsafeHead2 :: ByteString -> (Byte, Byte)
+    unsafeHead2 (PS x s l) = assert (l > 1) $
+      accursedUnutterablePerformIO $ withForeignPtr x $ \p ->
+                            liftA2 (,) (peekByteOff p s) (peekByteOff p (s+1))
 {-# INLINE ordering #-}
 
--- | Following three are for YARA strings.
-#define PD(func,pred) func :: Byte -> Bool; func = pred; {-# INLINE func #-}
-PD(isUnderscore,(== 95))
-PD(isLeadingByte,isAlpha <> isUnderscore)
-PD(isIdByte,isAlphaNum <> isUnderscore)
-#undef PD
+ellipsis :: Yp ()
+ellipsis = void $ dot *> dot
+{-# INLINE ellipsis #-}
 
 --- FAST PREDICATE PARSERS
-
--- | Peek at next byte.
---
--- Note: Doesn't fail unless at the end of input.
-peekByte :: Yp Byte
-peekByte = YP $ \b e l s ->
-  let pos = position e in
-  if bufferLengthAtLeast pos 1 b
-    then s b e (bufferUnsafeIndex b pos)
-    else ensureSuspended 1 b e l (\b_ e_ bs_ -> (s b_ e_ $! unsafeHead bs_))
-{-# INLINE peekByte #-}
-
-satisfy :: (Byte -> Bool) -> Yp Byte
-satisfy p = do
-  h <- peekByte
-  if p h
-    then advance 1 >> pure h
-    else fault "satisfy"
-{-# INLINE satisfy #-}
-
--- | Match a specific byte.
-byte :: Byte -> Yp Byte
-byte c = satisfy (== c)
-         <?> sig c
-{-# INLINE byte #-}
-
--- | Match any byte except the given one.
-notByte :: Byte -> Yp Byte
-notByte c = satisfy (/= c)
-            <?> "not '" +> c ++ "'"
-{-# INLINE notByte #-}
 
 -- Yes, I am that lazy.
 #define GO(label,comb,pred) label = comb (pred) <?> "label"  ; {-# INLINE label #-}
@@ -313,6 +348,13 @@ decimal = BS.foldl' step 0 `fmap` takeWhile1 isDigit
 {-# SPECIALISE decimal :: Yp Word #-}
 {-# INLINE decimal #-}
 
+-- | skipTo
+-- Gobbles up whitespace then applies parser
+skipTo :: Yp a -> Yp a
+skipTo = (*>) spaces
+{-# INLINE skipTo #-}
+
+
 -- | skipToHz
 -- Gobbles up horizontal space then applies parser
 skipToHz :: Yp a -> Yp a
@@ -340,36 +382,13 @@ takeTill :: (Byte -> Bool) -> Yp ByteString
 takeTill p = takeWhile (not . p)
 {-# INLINE takeTill #-}
 
--- | @followedBy p@ only succeeds when parser @p@ succeeds.
---
--- Note: does not consume any input. It tests if the parser would succeed.
--- When parsing keywords or name spaces, we usually want
--- to make ensure such is followed by a whitespace.
---
--- Note: /Backtracking is expensive/. The combinators is mostly to be used
--- on single byte parsing predicates.
---
--- Why the type @Yp a -> Yp ()@, instead of say
--- @(Word8 -> Bool) -> Yp ()@ if its used primarily for matching on
--- single bytes? Occasionally we do need to match on a pair of bytes.
---
---
--- End lines are sometimes not just a byte but a pair of bytes "\r\n" so
--- we can pass in any parser ('void'-ing out result type if needed).
-followedBy :: Yp a -> Yp ()
-followedBy p = YP $ \b e l s ->
-  case parse (void p) e (bufferUnsafeDrop (position e) b) of
-    Fail{}    -> l b e [] "followedBy"
-    Done{}    -> s b e ()
-    Partial{} -> prompt (\b_ e_ -> s b_ e_ ())
-                        (\b_ e_ -> l b_ e_ ["followedBy"] "followedBy")
-                        b e
-
 takeWhile :: (Byte -> Bool) -> Yp ByteString
 takeWhile p = do
     s <- BS.takeWhile p <$> getBuff
     continue <- atleastBytesLeft (length s)
-    forkA continue (pure s) $ takeWhileAcc p s
+    if continue
+      then takeWhileAcc p s
+      else pure s
 {-# INLINE takeWhile #-}
 
 takeWhile1 :: (Byte -> Bool) -> Yp ByteString
@@ -384,7 +403,7 @@ takeWhile1 p = do
       if eoc
         then takeWhileAcc p s
         else pure s
-    else fault "takeWhile1"
+    else fault_ "takeWhile1"
 {-# INLINE takeWhile1 #-}
 
 takeWhileAcc :: (Byte -> Bool) -> ByteString -> Yp ByteString
@@ -429,7 +448,7 @@ string bs = stringWithMorph id bs
 -- Note: not efficent since it backtracks after every failure.
 -- Note: it matches in-order of list.
 oneOfStrings :: [ByteString] -> Yp ByteString
-oneOfStrings [] = fault "oneOfStrings: passed empty list"
+oneOfStrings [] = fault_ "oneOfStrings: passed empty list"
 oneOfStrings ls = foldl1 (<|>) (fmap string ls)
 {-# INLINE oneOfStrings #-}
 
@@ -442,34 +461,38 @@ stringIgnoreCase = stringWithMorph toLower
 -- | To annotate
 stringWithMorph :: (ByteString -> ByteString)
                 -> ByteString -> Yp ByteString
-stringWithMorph fn sn = string_ (stringSuspend fn) fn sn where
+stringWithMorph fn sn = string_ (stringSuspend fn) fn sn
+  where
+    string_ :: (forall r. ByteString -> ByteString -> Buffer -> Env
+            -> Failure r -> Success ByteString r -> Result r)
+            -> (ByteString -> ByteString) -> ByteString -> Yp ByteString
+    string_ suspended f s0 = YP $ \b e l s ->
+      let bs  = f s0
+          n   = length bs
+          pos = position e
+          b_  = bufferSubstring pos n b
+          t_  = bufferUnsafeDrop pos b
+      in if
+        | bufferLengthAtLeast pos n b && (bs == f b_)  -> s b (posMap (+n) e) b_
+        | f t_ `isPrefixOf` bs   -> suspended bs (drop (length t_) bs) b e l s
+        | otherwise              -> failure "stringWithMorph" GenericException
 
-  string_ :: (forall r. ByteString -> ByteString -> Buffer -> Env
-          -> Failure r -> Success ByteString r -> Result r)
-          -> (ByteString -> ByteString) -> ByteString -> Yp ByteString
-  string_ suspended f s0 = YP $ \b e l s ->
-    let bs = f s0
-        n = length bs
-        pos = position e
-        b_ = bufferSubstring pos n b
-        t_ = bufferUnsafeDrop pos b
-    in if
-      | bufferLengthAtLeast pos n b && (bs == f b_)  -> s b (posMap (+n) e) b_
-      | f t_ `isPrefixOf` bs   -> suspended bs (drop (length t_) bs) b e l s
-      | otherwise              -> l b e [] "string"
-
-  stringSuspend :: (ByteString -> ByteString)
-                -> ByteString -> ByteString -> Buffer -> Env
-                -> Failure r -> Success ByteString r -> Result r
-  stringSuspend f s0 s1 = runParser (demandInput >>= go) where
-    m = length s1
-    go str = YP $ \b e l s -> let n = length (f str) in
-      if | n >= m && unsafeTake m (f str) == s1 ->
+    stringSuspend :: (ByteString -> ByteString)
+                  -> ByteString -> ByteString -> Buffer -> Env
+                  -> Failure r -> Success ByteString r -> Result r
+    stringSuspend f s0 s1 = runParser (demandInput >>= go) where
+      m = length s1
+      go str = YP $ \b e l s ->
+        let n = length (f str)
+            pos = position e
+            fp = filepath e
+        in 
+        if | n >= m && unsafeTake m (f str) == s1 ->
                let o = length s0
-               in s b (posMap (+o) e) (bufferSubstring (position e) o b)
-         | str == unsafeTake n s1 ->
+               in s b (posMap (+o) e) (bufferSubstring pos o b)
+           | str == unsafeTake n s1 ->
                stringSuspend f s0 (unsafeDrop n s1) b e l s
-         | otherwise              -> l b e [] "string"
+           | otherwise              -> fault_ "string "-- l b e [] "string"
 {-# INLINE stringWithMorph #-}
 
 -- | Checks if there are atleast `n` bytes of buffer string left.
@@ -477,7 +500,7 @@ stringWithMorph fn sn = string_ (stringSuspend fn) fn sn where
 atleastBytesLeft :: Int -> Yp Bool
 atleastBytesLeft i = YP $ \b e _ s ->
   let pos = position e + i in
-  if pos < bufferLength b || more e == Complete
+  if pos < bufferLength b || more e == False
     then s b (e { position = pos}) False
     else prompt (\b_ e_ -> s b_ e_ False)
                 (\b_ e_ -> s b_ e_ True)
@@ -501,11 +524,12 @@ ensureSuspended n = runParser (demandInput >> go)
 -- result.
 demandInput :: Yp ByteString
 demandInput = YP $ \b e l s ->
-  case more e of
-    Complete -> l b e [] "not enough input"
-    _        -> Partial $ \bs -> if isEmpty bs
-      then l b (e { more = Complete }) [] "not enough input"
-      else s (bufferPappend b bs) (e { more = Incomplete }) bs
+  let nei = ParseException (filepath e) "demandInput" (position e) NotEnoughInput
+  in case more e of
+    False -> l b e [] nei
+    _     -> Partial $ \bs -> if isEmpty bs
+      then l b (e { more = False }) [] nei
+      else s (bufferPappend b bs) (e { more = True }) bs
 {-# INLINE demandInput #-}
 
 data T s = T {-# UNPACK #-} !Int s
@@ -572,6 +596,12 @@ scan_ sft ret rho s0 = go "" s0 <?> "scan"
         else ret u $! acc ++ h
 {-# INLINE scan_ #-}
 
+
+
+-- -----------------------------------------------------------------------------
+-- Specialty Parsers
+
+
 -- | @SLToken@
 -- Use only for tracking parsing tokens of a string literal.
 data SLToken = EverythingOk
@@ -596,8 +626,8 @@ stringLiteral = do
   (s,b) <- getStringLiteralLines "" EverythingOk
   case s of
       Finished      -> b <$ quote
-      ErrorMsg msg  -> fault msg
-      _             -> fault $ "ERROR! The parser 'quotedStringWith' failed with uncaught final state: '" ++ C8.pack (show s) ++ "'"
+      ErrorMsg msg  -> fault_ msg
+      _             -> fault_ $ "ERROR! The parser 'quotedStringWith' failed with uncaught final state: '" ++ C8.pack (show s) ++ "'"
   <?> "string literal"
   where
     -- YARA spec says matches 'getStringLiteralLines'
@@ -641,10 +671,29 @@ stringLiteral = do
         | b == 34 && s /= Escaping -> Nothing
 {-# INLINE stringLiteral #-}
 
+-- | 'lineSeperated' is a parser that allows a compact way of consuming white
+-- space but ensuring atleast 1 newline character is parsed. It continues to parse
+-- any further whitespace (including more newlines).
+lineSeperated :: Yp ()
+lineSeperated = do
+  horizontalSpace  -- Parse remainder of any of current lines whitespace
+  endOfLine        -- Parse atleast one newline token
+  void $ spaces    -- Eatup any further whitespace
+
+-- | 'seekOnNewLine' applies a 'lineSeperated'
+seekOnNewLine :: Yp a -> Yp a
+seekOnNewLine = (*>) lineSeperated
 
 
+-- | Following three are for YARA strings.
+#define PD(func,pred) func :: Byte -> Bool; func = pred; {-# INLINE func #-}
+PD(isUnderscore,(== 95))
+PD(isLeadingByte,isAlpha <> isUnderscore)
+PD(isIdByte,isAlphaNum <> isUnderscore)
+#undef PD
 
-{- THE SALAVAGE YARD
+
+{- THE COMBINATOR GRAVE/SALAVAGE YARD
 Everything saved just in case.
 
 
@@ -720,10 +769,10 @@ litString = quote *> (go "") <* quote <?> "litString"
       -- Quote, preceeded by backslash is cool.
       | s == 92 && w == 34   = Just w
 
-      | s == 92 && (isSpace w || isNewline w)  = Just ~~tricky
+o      | s == 92 && (isSpace w || isNewline w)  = Just ~~tricky
 
 
-{-
+
     go acc = do
       -- Take till a quote, newline, or backslash
       bs <- takeTill $ \q -> q `elem` [92, 34, 10]
@@ -759,7 +808,7 @@ litString = quote *> (go "") <* quote <?> "litString"
         -- Shuts up incomplete-patterns
         _  -> fault "How did you get here?"
     notSpace = not . isSpace
--}
+
 -- MATCH STRINGS
     go acc = do
       -- Take till a quote, newline, or backslash
@@ -797,25 +846,16 @@ litString = quote *> (go "") <* quote <?> "litString"
         _  -> fault "How did you get here?"
     notSpace = not . isSpace
 
-
-
-
--}
-
-
 -- ? between (str "\"") (str "\"")  many $ choice [alphaNum, escapeseq,
                                                      --  doublequote, whitespace]
 --escQuot :: Parser Word8
 --escQuot = bSlash *> quot
-
 
 --- | Parse one or more occurances of 'a' perated by a delinator 'sep'
 
 --intersperse :: Foldable f => Parser sep -> f (Parser a) -> Parser (f a)
 --intersperse may not need
 
-
-{-
 -- | Consume input until either:
 -- 1) the predicate fails
 -- /or/
@@ -847,11 +887,6 @@ inputSpansChunks i = YP $ \_ t pos_ more _lose suc ->
           in prompt t pos more lose' suc'
 {-# INLINE inputSpansChunks #-}
 
-
-
-
-
-
 -- Is point-free style ever slower or faster
 -- or does ghc optimize it all equivalently?
 -- option = (flip (<|>)) . pure
@@ -859,16 +894,6 @@ inputSpansChunks i = YP $ \_ t pos_ more _lose suc ->
 option :: a -> Yp a -> Yp a
 option x p = p <|> pure x <?> "option"
 {-# INLINE option #-}
-
-
-
-
--- | Match either a single newline character @\'\\n\'@, or a carriage
--- return followed by a newline character @\"\\r\\n\"@.
-endOfLine :: Yp ()
-endOfLine = void (byte 10) <|> void (string "\r\n")
-
-
 
 alphaNum :: Yp Byte
 alphaNum = satisfy isAlphaNum  <?> "alphaNum"
@@ -890,10 +915,7 @@ space1 = takeWhile1 isSpace <?> "space1"
 horizontalSpace :: Yp Byte
 horizontalSpace = satisfy isHorizontalSpace <?> "horizontalSpace"
 {-# INLINE horizontalSpace #-}
--}
 
-
-{-
 -- | Peek at the next 'N' number of bytes
 peekNBytes :: Word -> Yp ByteString
 peekNBytes n = YP $ \b e l s ->
@@ -902,4 +924,29 @@ peekNBytes n = YP $ \b e l s ->
        then s b e (bufferSubstring (fromIntegral pos) n b)
        else ensureSuspended 1 b e l (\b_ e_ bs_ -> s b_ e_ $! unsafeHead bs_)
 {-# INLINE peekNBytes #-}
+
+-- | @followedBy p@ only succeeds when parser @p@ succeeds.
+--
+-- Note: does not consume any input. It tests if the parser would succeed.
+-- When parsing keywords or name spaces, we usually want
+-- to make ensure such is followed by a whitespace.
+--
+-- Note: /Backtracking is expensive/. The combinators is mostly to be used
+-- on single byte parsing predicates.
+--
+-- Why the type @Yp a -> Yp ()@, instead of say
+-- @(Word8 -> Bool) -> Yp ()@ if its used primarily for matching on
+-- single bytes? Occasionally we do need to match on a pair of bytes.
+--
+--
+-- End lines are sometimes not just a byte but a pair of bytes "\r\n" so
+-- we can pass in any parser ('void'-ing out result type if needed).
+followedBy :: Yp a -> Yp ()
+followedBy p = YP $ \b e l s ->
+  case parse (void p) e (bufferUnsafeDrop (position e) b) of
+    Fail{}    -> l b e [] "followedBy"
+    Done{}    -> s b e ()
+    Partial{} -> prompt (\b_ e_ -> s b_ e_ ())
+                        (\b_ e_ -> l b_ e_ ["followedBy"] "followedBy")
+                        b e
 -}

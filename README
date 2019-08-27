@@ -15,7 +15,7 @@
 
 - Function names with an prefix underscore ('_') indicate they are 'incomplete' versions of other, locally defined functions. We mean that such a function is not often directly used but needs to be written as top level function. Done for name space reasons as well as readability reasons.
 
-- Imports
+## Imports
 
 Unfortunately, there is still the antiquated "Prelude" to deal with.  
 -- Rule of thumb [I]: don't include an explicit import list
@@ -23,3 +23,13 @@ Unfortunately, there is still the antiquated "Prelude" to deal with.
 ---------if its in the prelude. hide it or import qualified from prelude.
 -- Rule of thumb [II]: avoid qualified imports
 That doesn't say no qualified imports. s
+
+
+
+## Language Extensions
+These following languages are used by nearly every source file and should be included in the 'extensions' section of the .cabal file:
+- NoImplicitPrelude
+- OverloadedStrings
+We have made a custom prelude all files import. These are all considered 'safe' in the community sense of being well tested and they dont introduce any type-system breaking effects. The following are 
+
+- TupleSections

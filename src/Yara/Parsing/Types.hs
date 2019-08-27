@@ -11,9 +11,9 @@
 -- Stability   :
 -- Portability :  unknown
 --
--- To annotate.
+-- Module contains the yara document AST and related types. 
 --
-module Yara.Parsing.Types where
+module Yara.Parsing.AST where
 
 import Yara.Prelude
 
@@ -114,13 +114,12 @@ data Rule = Rule {
   }
 
 
-
-
-
-
-
-
-
+data LinearOrder = LessThan
+                 | LessThanOrEqual
+                 | Equal
+                 | GreaterThenOrEqual
+                 | GreaterThan
+                 deriving (Eq, Show, Ord)
 
 data PkgName = ByteString
 

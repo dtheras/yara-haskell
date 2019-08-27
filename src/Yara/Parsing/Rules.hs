@@ -24,7 +24,7 @@ import Yara.Parsing.Combinators
 import Yara.Parsing.Conditions
 import Yara.Parsing.Parser
 import Yara.Parsing.Strings
-import Yara.Parsing.Types
+import Yara.Parsing.AST
 import Yara.Parsing.Hash
 
 import Text.Regex.Posix.Wrap
@@ -208,20 +208,6 @@ ruleType = do
 {-# INLINE ruleType #-}
 
 
--- | 'lineSeperated' is a parser that allows a compact way of consuming white
--- space but ensuring atleast 1 newline character is parsed. It continues to parse
--- any further whitespace (including more newlines).
-lineSeperated :: Yp ()
-lineSeperated = do
-  horizontalSpace  -- Parse remainder of any of current lines whitespace
-  newLine          -- Parse atleast one newline token
-  void $ spaces    -- Eatup any further whitespace
-
--- | 'seekOnNewLine' applies a 'lineSeperated'
-seekOnNewLine :: Yp a -> Yp a
-seekOnNewLine = (*>) lineSeperated
-
-
 -- type Metadata = Map.Map Identifier Value
 -- | Parses the metadata of a yara rule.
 --
@@ -230,6 +216,7 @@ parseMetadatum :: Yp Metadatum
 parseMetadatum = do
   skipTo $ string "meta:"
   seekOnNewLine $ sepByMap aMetadata lineSeperated
+                -- why not
   where
     aMetaData = pair identifier (Just $ skipToHz eq) (skipToHz value)
 
@@ -237,218 +224,6 @@ parseMetadatum = do
 
 ---------------------- CONDITIONS ---------------------------
 -------------------------------------------------------------
-
-
--- | 'parseCondition' is the main function that parses a conditional line in a
--- YARA rules file
-parseConditions :: Yp ConditionalExp
-parseConditions = undefined
-
-
-parseACondition :: Yp ConditionalExp
-parseACondition = undefined
-
-
-
---- horribly inefficent because if it gets to the  "and" and finds a "r"
--- itll restart from the begining of the parser
-and :: Yp ConditionalExp
-and = do
-  c1 <- condition
-  horizontalSpaces
-  string "and"
-  horizontalSpaces
-  c2 <- perhaps condition
-  if c2 == Nothing
-    then undefined
-    else
-     return $ And c1 c2
-
-condition :: Yp ConditionalExp
-condition = do
-  b <- peekByte
-  if b == 40       -- if '('
-    then do
-      c <- condition
-      cParen
-      return c
-    else undefined
-      --one of the conditions
-
--- | YARA specification allows offsets to be written in hexadecimal with
--- prefix '0x' (we allow '0X' as well) as its handy when writing
--- virtual addresses.
-offset :: Yp Word
-offset = decimal <|> hexadecimal
-{-# INLINE offset #-}
-
-
--- | DONE 2.3.1 Counting strings
-stringCount :: Yp ConditionalExp
-stringCount = do
-  byte 35          -- For counting occurences of strings, identifiers are
-  i <- identifier  -- preceeded by a '#' rather than the normal '$'
-  horizontalSpaces
-  p <- ordering
-  horizontalSpaces
-  n <- decimal
-  pure $ StringCount i p n
-{-# INLINE stringCount #-}
-
-
--- | Get the offset or virtual address of the i-th occurrence of string $a
--- by using @a[i]. The indexes are one-based, so the first occurrence would
--- be @a[1] the second one @a[2] and so on. If you provide an index greater
--- then the number of occurrences of the string, the result will be a Nothing.
-offsetOf :: Yp ConditionalExp
-offsetOf =
-  liftA2 Offset (identifier <* sqBra <* spaces) (offset <* spaces <* sqKet)
-{-# INLINE offsetOf #-}
-
--- DONE 2.3.2
-stringInAt :: Yp ConditionalExp
-stringInAt = do
-  i <- label
-  horizontalSpaces
-  s <- string "at" <|> string "in"
-  horizontalSpaces
-  if s == "at"
-    then do
-      n <- offset
-      return $ StringAt i n
-    else do
-      oParen
-      l <- offset
-      ellipsis
-      -- Remark: YARA spec allows the string "filesize" to indicate
-      -- the upper offset as the end of file
-      u <- offset -- <|> string "filesize" *> getFilesize
-      cParen
-      return $ StringIn i l u
-{-# INLINE stringInAt #-}
-
-
-
--- 2.3.11 Referencing other rules
--- | 'ruleRef'
--- When writing the conditions for a certain rule, you can also make reference
--- to a rule in a manner that resembles a function invocation
--- of traditional programming languages. In this way you can create rules
--- that depend on others. Let’s see an example:
---
--- rule Rule1 {
---    strings:
---        $a = "dummy1"
---    condition:
---        $a
--- }
--- rule Rule2 {
---    strings:
---        $a = "dummy2"
---    condition:
---        $a and Rule1
--- }
---
--- As can be seen in the example, a file will satisfy Rule2 only if it
--- contains the string “dummy2” and satisfies Rule1. Note that it is strictly
--- necessary to define the rule being invoked before the one that will make
--- the invocation.
-ruleRef :: Yp ConditionalExp
-ruleRef = do
-  -- Why '_identifier' instead of 'identifier'?
-  -- Need to avoid the check that it is in the strings (its empty anyways).
-  i <- _identifier
-  r <- getInscopeRules
-  if i `Set.member` r
-    then pure $ RuleReference i
-    else fault $ "Referenced rule is not in scope '" ++ i ++ "'"
-
-
--- 2.3.4
--- |
--- Match filesize of file being scanned; size is expressed in bytes.
---
--- rule FileSizeExample
--- {
---    condition:
---        filesize > 200KB
--- }
---
--- Here: the parser doesn't immediately check the condition, true or false.
---
--- 1) parsing of yara rules is pure. so we cannot simply fetch it.
--- 2) it could be included in state? no. if we are scanning several documents,
---    it varies. plus it would mean calculating file size ahead of time with
---    no promise of using it. may be an issue on huge files.
--- 3) but keeping a constructor with two fields is computationally higher than
---    just a bool. Not entirely. Since ti would be a bool contructor wrapper
---    around the value anyways. so its neglegible.
---
--- Note: this is distinct from the "filesize" keyword, which gets replaced with
--- the value of the file-being-scanned's digital size.
---
-conditionFilesize :: Yp ConditionalExp
-conditionFilesize  = do
-  string "filesize"
-  spaces          -- 0 or more horizontal spaces is OK
-  o <- ordering   -- '<' '>' or '=='
-  spaces          -- 0 or more horizontal spaces is OK
-  s <- decimal    -- integer value
-  u <- takeWhile isAlpha  -- Handle the units
-  let fac = case toLower u of
-        ""   -> 1
-        "b"  -> 1
-        "kb" -> 1000
-        "mb" -> 1000000
-        "gb" -> 1000000000
-        "tb" -> 1000000000000
-        _    -> 0
-  if fac > 0
-    then return $ FileSize (fac * s) o
-    else fault $ "Unrecognized units value for a filesize: '" ++ u ++ "'"
-{-# INLINE conditionFilesize #-}
-
-
-data SetOfStrings
-  = AllOfStrings
-  | AnyOfStrings
-  | OfStrings Word
-
-conditionSetOfStrings :: Yp ConditionalExp
-conditionSetOfStrings = do
-  _ <- string "all" $> All
-         <|> string "any" $> Any
-         <|> N <$> decimal
-  spaces
-  string "of"
-  spaces
-  --_ <- (grouping (label <|> regex) comma)
-   --    (string "them") <|>
-  fault ""
-
-
-
-
-
-allconditions = ruleRel <|> conditionFilesize <|> conditionSetOfStrings
-{-
-_and :: Yp Condition
-_and = do
-  m <- subCondition
-  spaces
-  string "and"
-  spaces
-  n <- subCondition
-  return $ AndCon m n
-
--}
-
-
-
-
-
-
-
 
 
 
@@ -496,49 +271,6 @@ parseRuleBlock = do
 
 
 -- HEX
-
-hexPr :: Yp HexTokens
-hexPr = Seq.singleton . uncurry Pair <$> (hexDigit `pair` hexDigit)
-     where hexDigit = satisfy $ \w -> w == 63 || w - 48 <=  9
-                              || w - 97 <= 25 || w - 65 <= 25
-
-hexJump :: Yp HexTokens
-hexJump = between sqBra sqKet $ do
-  l <- optional decimal
-  flank space dash
-  u <- optional decimal
-  return $ maybe Seq.empty Seq.singleton $ if
-    | isNothing l && isNothing u  -> IJmp 0
-    | isNothing l                 -> RJmp 0 <$> u
-    | isNothing u                 -> IJmp <$> l
-    | otherwise                   -> uncurry RJmp <$> untuple (l,u)
-
-hex :: Yp HexStr
-hex = between oCurl cCurl $ sepBy1 (hexGrp <|> hexStd) space1
-  where
-    hexAux = Seq.fromList <$> sepBy1 (hexPr <|> hexJump) space1
-    hexStd = Std <$> hexAux
-    hexGrp = Grp <$> between oPar cPar (sepBy1 hexAux $ flank space vBar)
-
--- PARSE YARA STRING
-
-patterns :: Yp YaraStr
-patterns = do
-  l <- label
-  skipTo eq
-  let regex'  = YReg l <$> regex
-      string' = YStr l <$> string
-      hex'    = YHex l <$> hex
-  skipTo (regex' <|> string' <|> hex') <*> skipTo modifiers
-  <?> "patterns"
-  where
-    -- Using a set here to automatically remove dupicates. Since modifiers as a "set"
-    -- data structure will later be consumed in conditional clauses (and not used
-    -- futher) they will shortly be dropped
-
-    scan' = liftA2 Set.insert keys ((space1 *> scan') <|> pure Set.empty)
-    scan = foldl (|>) empty <$> scan' -- change to a sequence
-
 
 parseConditions :: Yp ()--[(ByteString,Pattern)]->Parser[ByteString->Bool]
 parseConditions = do

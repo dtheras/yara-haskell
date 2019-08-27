@@ -1,13 +1,18 @@
+{-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE Rank2Types #-}
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 {-# OPTIONS_HADDOCK prune #-}
+{-# LANGUAGE OverloadedLists #-}
 -- |
 -- Module      :  Yara.Parsing.Parser
 -- Copyright   :  David Heras 2018-2019
@@ -19,54 +24,19 @@
 --
 -- Fundamental YARA parser/data types and based on the Attoparsec library.
 --
-module Yara.Parsing.Parser (
-    -- * Parsing types
-      Yp(..)
-    , Result(..)
-    , More(..)
-    , Failure
-    , Success
-    , Env(..)
-
-    -- * Flag parsing error
-    , fault
-
-    -- * Writing combinators
-    , (<?>)
-    , (<!>)
-
-    , advance
-    , prompt
-    , posMap
-    , forkA
-    , getPosByteString
-    , getPos
-    , getStrings
-    , getInscopeRules
-    , getFilename
-    , getFiletype
-
-    -- * Running parsers
-    , parse
-    , parse_
-
-    ) where
+module Yara.Parsing.Parser where
 
 import Yara.Prelude hiding (pack)
 import Yara.Parsing.Buffer
-import Yara.Parsing.Types
+import Yara.Parsing.AST
 
-import Control.DeepSeq
-import Data.ByteString.Char8 hiding (null, cons, snoc, map)
-import Data.ByteString.Internal (ByteString(..))
-import Data.Default
+import Control.Monad.Except
+import Data.Map.Strict (Map)
+import Data.Set (Set)
 import Data.String () -- Only need typeclass imported
 import Data.Typeable
-import qualified Data.Map.Strict as Map
-import qualified Data.Set        as Set
 
 data ExceptionCode
-   -- Preproccessing-specific error codes
    = UnterminatedInclude
    | FileDoesNotExist
    | ExpectedFilePathMissing
@@ -76,100 +46,88 @@ data ExceptionCode
    | UnclosedParenthesis
    | LonelyOpenParen
    | LonelyClosedParen
+   | EndOfInput
+   | NotEnoughInput
    | GenericException
-   deriving Show
+   | TOPLEVELPARSEFAIL
+   deriving (Generic, NFData, Show)
 
-data ParseException = ParseException {
-    exp_filepath :: FilePath      -- ^ Filepath of source file being processed
-  , exp_message  :: ByteString    -- ^ Reporting message
-  , exp_at       :: Pos           -- ^ Location (in source file) exception was thrown
-  , exp_code     :: ExceptionCode -- ^ Cde indicating the type of exception thrown
-  }
-
-prettyPrintException :: ParseException -> ByteString
-prettyPrintException (ParseException f m p c) = stamp ++ prettyShowExceptionCode
-  where
-    stamp = f ++ "(" ++ int2bs.position p ++ "): "
-    showError = concat $ case c of
-      UinatedInclude      -> ["unterminated include pragma '", msg, "' found in '", fp, "'"]
-      HeaderFileDoesNotExist   -> ["included header file '", msg, "' does not exist"]
-      HeaderPathMissing        -> [""]
-      UnrecognizedPragma       -> ["unrecognized pragma '", msg]
-      IncorrectlyAlignedPragma -> undefined
-      GenericException         -> msg
-
-instance Show ParseException where
-  show = unpack . prettyShowException
+instance Default ExceptionCode where
+  -- Unspecified thrown exceptions will get recorded as "GenericException"
+  -- May demove later
+  def = GenericException
 
 -- | A result type for the YP
 data Result r
-      -- | Parsing failed
-    = Fail ByteString [ByteString] ParseException
-      -- | Parsing in-progess /and/
-      -- expecting more input
-    | Partial (ByteString -> Result r)
-      -- | Parsing success
-    | Done ByteString r
+  = Fail Env           -- ^ Final Enivronment
+         ByteString    -- ^ Description of fail situation
+         ExceptionCode -- ^ Failure code
+  | Done ByteString    -- ^ Remaining input
+         r             -- ^ Parsed value
+  | Partial (ByteString -> Result r)
+  deriving (Generic)
+
+deriving instance (NFData r) => NFData (Result r)
 
 instance Eq r => Eq (Result r) where
   (Done b1 r1) == (Done b2 r2) = b1 == b2 && r1 == r2
   _            == _            = False
 
 instance (Show r) => Show (Result r) where
-  showsPrec d ir = showParen (d > 10) $
-    case ir of
-      (Partial _)      -> shows "Partial _"
-      (Done t r)       -> shows "Done" . toShows t . toShows r
-      (Fail t stk exp) -> shows "" . toShows t . toShows exp . toShows stk
+  show res = case res of
+    (Partial _)  -> "Partial _"
+    (Done m r)   ->
+      let rm = bs2s $ if length m > 20
+            then take 20 m ++ "..."
+            else m
+      in mconcat ["Done{ ", show r, " }: \"", rm,"\""]
+    (Fail e m c) -> let
+      f = filepath e
+      p = position e
+      stamp = mconcat [f, "(", int2bs p, "): " ]
+      message = mconcat $ case c of
+        UnterminatedInclude -> ["unterminated include pragma '", m,
+                                "' found in '", f, "'"]
+        FileDoesNotExist -> ["included header file '", m,
+                             "' does not exist"]
+        UnrecognizedPragma -> ["unrecognized pragma '", m]
+        IncorrectlyAlignedPragma -> undefined
+        GenericException         -> [m]
+     in bs2s $ stamp ++ message
 
-instance (NFData r) => NFData (Result r) where
-    rnf (Fail t stk exp) = rnf t `seq` rnf stk `seq` rnf exp
-    rnf (Partial _)  = ()
-    rnf (Done t r)   = rnf t `seq` rnf r
-    {-# INLINE rnf #-}
-
--- | To annotate
+-- | `Env` contains the basic state as well as "read-only" information
 data Env = Env {
-     position     :: !Pos
-  -- ^ Position in buffer.
-  ,  more         :: !More
-  -- ^ More input available?
-  ,  imports      :: !(Set.Set ByteString)
-  -- ^ Set of imported modules
-  ,  externalVars :: !(Map.Map ByteString  Value)
-  -- ^ Set of externally defined variables
-  ,  localStrings :: !(Map.Map ByteString Pattern)
-  -- ^ Stored as a follows:
-  -- 'ByteString' stores the string name
-  -- 'Pattern' stores the string, regex or byte with the set of modifiers
-  ,  inscopeRules :: !(Set.Set ByteString)
-  -- ^
-  ,  filepath     :: ByteString
-  -- ^ The filepath of the file being parsed
-  ,  filetype     :: ByteString
-  -- ^
-  } deriving (Show, Eq)
+     filepath      :: ByteString             -- ^ The filepath of the file being parsed
+  ,  filetype      :: ByteString             -- ^
+  ,  position      :: Pos                    -- ^ Position in buffer.
+  ,  more          :: Bool                   -- ^ Is more input available?
+  ,  parserLabels  :: [ByteString]           -- ^
+  ,  imports       :: Set ByteString         -- ^ Set of imported modules
+  ,  externalVars  :: Map ByteString  Value  -- ^ Set of externally defined variables
+  ,  localStrings  :: Map ByteString Pattern -- ^ Inscope strings
+  ,  inscopeRules  :: Set ByteString         -- ^ Inscope rules
+  } deriving (Show, Generic, NFData)
 
-defEnv :: Env
-defEnv = Env {
-    position = 0
-  , more = Incomplete
-  , imports = Set.empty
-  , externalVars = Map.empty
-  , localStrings = Map.empty
-  , inscopeRules = Set.empty
-  , filepath = ""
-  , filetype = ""
-  }
-
--- | More input avialable?
-data More = Complete | Incomplete deriving (Eq, Show)
+instance Default Env where
+  def = Env { position = 0
+            , more = True
+            , imports = []
+            , parserLabels = []
+            , externalVars = []
+            , localStrings = []
+            , inscopeRules = []
+            , filepath = ""
+            , filetype = ""
+            }
 
 -- | To annotate
-type Failure r = Buffer -> Env -> [ByteString] -> ParseException -> Result r
+type Failure r = Buffer -> Env -> ByteString -> ExceptionCode -> Result r
 
 -- | To annotate
 type Success a r = Buffer -> Env -> a -> Result r
+
+-- -----------------------------------------------------------------------------
+-- Yara Parser
 
 -- | Main parser type
 --
@@ -247,29 +205,24 @@ instance Default a => Default (Yp a) where
 -- c) Avoid `throwError`
 --
 fault :: ExceptionCode -> ByteString -> Yp a
-fault exp msg = Yp $ \b e l _ ->
-   let fp = filepath e
-       po = position e
-   in l b e [] $ ParseException fp msg po exp
+fault code msg = YP $ \b e l _ -> l b e msg code
 {-# INLINE fault #-}
 
 fault_ :: ByteString -> Yp a
-fault_ msg = Yp $ \b e l _ ->
-   let fp = filepath e
-       po = position e
-   in l b e [] $ ParseException fp msg po GenericException
+fault_ msg = YP $ \b e l _ -> l b e msg GenericException
 {-# INLINE fault_ #-}
 
--- | With the way the parser is written, errors cannot be "caught." That is correct
--- since (a) failed parsers always backtrack and (b) generally parsing errors are
--- not something that can be caught .
+failure :: ExceptionCode -> ByteString -> Failure r
+failure code msg = \_ e _ _ ->  Fail e msg code
+{-# INLINE failure #-}
+
 instance MonadError ExceptionCode Yp where
   throwError ex = fault ex "Error thrown (MonadError)"
   catchError p f = YP $ \b e l s ->
     let res = runParser p b e l s
     in case res of
-      (Fail rst qs exp)  -> f exp
-      _                  -> res
+      (Fail _ _ ex) -> runParser (f ex) b e l s
+      _             -> res
 
 instance Alternative Yp where
   empty = fault_ "empty (Alternative)"
@@ -293,12 +246,14 @@ instance Monad Yp where
   {-# INLINE (>>) #-}
   return = pure
   {-# INLINE return #-}
+  fail = fault_ . s2bs
+  {-# INLINE fail #-}
 
 instance MonadPlus Yp where
   mzero = fault_ "mzero"
   {-# INLINE mzero #-}
   mplus f g = YP $ \b e l s ->
-    runParser f b e (\nb _ _ _ -> runParser g nb e l s) s
+    runParser f b e (\b_ e_ _ _ -> runParser g b_ e l s) s
   {-# INLINE mplus #-}
 
 instance Semigroup a => Semigroup (Yp a) where
@@ -311,14 +266,10 @@ instance Monoid a => Monoid (Yp a) where
   mappend = (<>)
   {-# INLINE mappend #-}
 
--- -----------------------------------------------------------------------------
--- Exception Throwing
-
-
 instance MonadState Env Yp where
   get = YP $ \b !e _ s -> s b e e
   {-# INLINE get #-}
-  put e = YP $ \b _ l s -> runParser (pure ()) b e l s
+  put e = YP $ \b _ l s -> runParser unit b e l s
   {-# INLINE put #-}
 
 instance MonadReader Env Yp where
@@ -330,33 +281,22 @@ instance MonadReader Env Yp where
   {-# INLINE reader #-}
 
 #define GO(n,T,s) n :: Yp (T); n = reader s; {-# INLINE n #-}
-GO(getPos,Int,position)
-GO(getStrings,Map.Map ByteString Pattern,localStrings)
-GO(getInscopeRules,Set.Set ByteString,inscopeRules)
-GO(getFilepath,FilePath,filepath)
-GO(getFiletype,ByteString,filetype)
+GO(getPos, Int, position)
+GO(getStrings, Map ByteString Pattern, localStrings)
+GO(getInscopeRules, Set ByteString, inscopeRules)
+GO(getFilepath, FilePath, filepath)
+GO(getFiletype, ByteString, filetype)
 #undef GO
 
 -- | Name the parser, in the event failure occurs.
-infixr 0 <?>
+infixr 1 <?>
 (<?>) :: Yp a -> ByteString -> Yp a
-par <?> msg = YP $ \b e l s ->
-   runParser par b e (\b_ e_ s_ m_ -> l b_ e_ (msg:s_) m_) s
+par <?> m = YP $ \b e l s -> let tmp = parserLabels e
+  in runParser par b e (\b_ e_ s_ c_ -> l b_ (e {parserLabels = m:tmp}) s_ c_) s
 {-# INLINE (<?>) #-}
 
--- | Name the module of the parser, in case failure occurs.
---
--- Testing it out ----> may not use or may remove later.
--- The idea is that imported modules can be given a label at the begining
--- instead of rewriting the module name everytime
-infixl 0 <!>
-(<!>) :: ByteString -> Yp a -> Yp a
-msg <!> par = YP $ \b e l s ->
-   runParser par b e (\b_ e_ s_ m_ -> l b_ e_ s_ (msg ++ m_)) s
-{-# INLINE (<!>) #-}
-
 posMap :: (Int -> Int) -> Env -> Env
-posMap f e = e { position = p } where p = f $ position e
+posMap f e = let temp = position e in e { position = f temp }
 {-# INLINE posMap #-}
 
 -- | Advance the position pointer. Use very /carefully/ since its unnatural
@@ -365,22 +305,6 @@ advance :: Int -> Yp ()
 advance n = YP $ \b e _ s -> s b (posMap (+n) e) ()
 {-# INLINE advance #-}
 
--- | Run a parser.
-parse :: Yp a  -- ^ Parser to run
-      -> Env           -- ^ Env to run with (ie starting state)
-      -> ByteString    -- ^ ByteString to parse
-      -> Result a
-parse p env b =
-  runParser p (toBuffer b)
-              (env { position = 0, more = Incomplete })
-              (\t e -> Fail (bufferUnsafeDrop (position e) t))
-              (\t e -> Done (bufferUnsafeDrop (position e) t))
-{-# INLINE parse #-}
-
--- | Parse with default environment settings.
-parse_ :: Yp a -> ByteString -> Result a
-parse_ p = parse p defEnv
-{-# INLINE parse_ #-}
 
 -- | Ask for input.  If we receive any, pass the augmented input to a
 -- success continuation, otherwise to a failure continuation.
@@ -388,7 +312,70 @@ prompt :: (Buffer -> Env -> Result r)
        -> (Buffer -> Env -> Result r)
        -> Buffer -> Env -> Result r
 prompt l s b e = Partial $ \bs -> if isEmpty bs
-  then l b (e { more = Complete })
-  else s (bufferPappend b bs) (e { more = Incomplete })
+  then l b (e { more = False })
+  else s (bufferPappend b bs) (e { more = True })
 {-# INLINE prompt #-}
 
+-- -----------------------------------------------------------------------------
+-- Running parsers
+
+-- | Run a parser.
+parse :: Yp a  -- ^ Parser to run
+      -> Env         -- ^ Env to run with (ie starting state)
+      -> ByteString  -- ^ ByteString to parse
+      -> Result a
+parse p env bs =
+  runParser p (toBuffer bs)
+              (env { position = 0, more = True })
+              (\_ e s _ -> Fail e s TOPLEVELPARSEFAIL)
+              (\b e t   -> Done (bufferUnsafeDrop (position e) b) t)
+{-# INLINE parse #-}
+
+-- | Parse with default environment settings.
+parse_ :: Yp a -> ByteString -> Result a
+parse_ p = parse p def
+{-# INLINE parse_ #-}
+
+
+
+
+
+{- TODO: Need to verify compiler core-dumps basically this instance before
+         deleting.
+instance (NFData r) => NFData (Result r) where
+  rnf (Fail m n e) = rnf m `seq` rnf n `seq` rnf e
+  rnf (Partial _)      = ()
+  rnf (Done t r)       = rnf t `seq` rnf r
+  {-# INLINE rnf #-}
+
+
+
+
+
+
+instance Functor Result where
+  fmap _ (Fail e b c) = Fail e b c
+  fmap f (Partial p)  = Partial $ \x -> fmap f $ p x
+  fmap f (Done b r)   = Done b $ f r
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+newtype ModName = ModName String        -- Module name
+ deriving (Show,Eq,Ord,Data,Generic)
+
+newtype PkgName = PkgName String        -- package name
+ deriving (Show,Eq,Ord,Data,Generic)
+-}
