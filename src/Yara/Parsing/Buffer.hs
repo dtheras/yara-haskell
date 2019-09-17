@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 -- |
@@ -25,7 +26,6 @@ module Yara.Parsing.Buffer (
   , bufferUnsafeDrop
   , bufferElemAt
   , bufferSubstring
-  , accursedUnutterablePerformIO  -- Carefull, see documentation.
   ) where
 
 import Yara.Prelude
@@ -92,19 +92,19 @@ bufferAppend (Buf fp0 off0 len0 cap0 gen0) !fp1 !off1 !len1 =
       if | gen == gen0 && newlen <= cap0 -> do
               let newgen = gen + 1
               poke (castPtr ptr0) newgen
-              memcpy (ptr0 `plusPtr` (off0+len0))
-                     (ptr1 `plusPtr` off1)
+              memcpy (ptr0 ~+ (off0+len0))
+                     (ptr1 ~+ off1)
                      len1
               return (Buf fp0 off0 newlen cap0 newgen)
          | otherwise                     -> do
               let newcap = newlen * 2
               fp <- mallocPlainForeignPtrBytes (newcap + genSize)
               withForeignPtr fp $ \ptr_ -> do
-                let ptr    = ptr_ `plusPtr` genSize
+                let ptr    = ptr_ ~+ genSize
                     newgen = 1
                 poke (castPtr ptr_) newgen
-                memcpy ptr (ptr0 `plusPtr` off0) len0
-                memcpy (ptr `plusPtr` len0) (ptr1 `plusPtr` off1)
+                memcpy ptr (ptr0 ~+ off0) len0
+                memcpy (ptr ~+ len0) (ptr1 ~+ off1)
                        len1
                 return (Buf fp genSize newlen newcap newgen)
 {-# INLINE bufferAppend #-}

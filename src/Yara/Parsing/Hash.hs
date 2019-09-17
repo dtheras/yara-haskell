@@ -1,10 +1,11 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE BangPatterns      #-}
+{-# LANGUAGE BlockArguments    #-}
 {-# LANGUAGE NoImplicitPrelude #-}
-{-# LANGUAGE UnboxedSums #-}
-{-# LANGUAGE PackageImports #-}
-{-# OPTIONS_GHC -funbox-strict-fields #-}
--- Note: Regarding the use of PackageImports
+{-# LANGUAGE UnboxedSums       #-}
+{-# LANGUAGE PackageImports    #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -funbox-strict-fields#-}
+-- [*] Regarding use of `PackageImports`:
 --
 -- Several hours were spent attempting to resolve the ghci complaint:
 --
@@ -13,8 +14,8 @@
 --       cryptohash-0.11.9 cryptonite-0.25"
 --
 -- While the PackageImports pragma is general frowned upon, it is currently
--- the only (not-hackish) solution that (a) has worked and (b) will easily
--- transfer to another computer. The use of "-ignore-package" was suggested
+-- the only (not-hackish) solution that (a) has worked and (b) portable.
+-- The use of "-ignore-package" was suggested
 -- but ghc(i) cannot parse it as a {-# OPTIONS_GHC #-} in a source file.
 -- Read here: https://downloads.haskell.org/~ghc/latest/docs/html/
 --                     users_guide/glasgow_exts.html#package-qualified-imports
@@ -47,7 +48,6 @@ import Yara.Prelude
 import Yara.Parsing.Parser
 import Yara.Parsing.Combinators
 
-import Control.Applicative
 import "cryptonite" Crypto.Hash
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString as S
@@ -92,11 +92,12 @@ parseHash = flip (<?>) "parseHash" $ do
     StringArg l -> return $ handleLiteralArg hs l
     Int64Args m n -> do
       spaces
-      eqeq
+      equal
+      equal
       spaces
       r <- quotedString <?> "Hash: Expecting literal string"
       if S.null r
-        then fault "Hash: expected hash cannot be empty."
+        then fault_ "Hash: expected hash cannot be empty."
         else return $ handleFileArgs hs m n r
 
   where

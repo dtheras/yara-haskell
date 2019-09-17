@@ -1,6 +1,6 @@
-{-# LANGUAGE ApplicativeDo #-}
-{-# LANGUAGE BlockArguments #-}
-{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE ApplicativeDo     #-}
+{-# LANGUAGE BlockArguments    #-}
+{-# LANGUAGE MultiWayIf        #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
 -- |
@@ -27,33 +27,27 @@ import Yara.Parsing.Strings
 import Yara.Parsing.AST
 import Yara.Parsing.Hash
 
-import Text.Regex.Posix.Wrap
-import Text.Regex.Posix ()
-    -----
-import qualified Data.Map.Strict as Map
-import qualified Data.Sequence   as Seq
-import qualified Data.Set        as Set
-
-
-
+import Data.Map.Strict hiding (fromDistinctAscList)
+import Data.Sequence
+import Data.Set
 import Debug.Trace
 
 
-{- Would is be possible to write something allong the lines of:
+data Verified = Verified
+data Unverified = Unverified
 
-parseRules :: ______
-parseRules = handleComments $ do
-  parser1
-  ...
-  parserN
+data YaraDoc = YaraDoc {
+     docImports  :: Seq FilePath
+  ,  docIncludes :: Seq FilePath
+  ,  docRules    :: Seq YaraRuleBlock
+  }
 
-handleComments :: Yp a -> Yp a
-handleComments p = case runParser p of
-  sucessfill -> then sucessful
-  fail       -> do
-       parseComment
-       continue from left of spots
--}
+data Import a where
+  UnverifiedImport :: FilePath -> Import Unverified
+
+data Include = Include FilePath
+
+
 
 
 
@@ -68,14 +62,15 @@ bool = (string "false" $> False) <|> (string "true" $> True) <?> "bool"
 {-# INLINE bool #-}
 
 value :: Yp Value
-value = (ValueBool <$> bool) <|> {-ValueS <$> quotedString,-}
-        (ValueInteger <$> decimal)
+value = (ValueBool <$> bool) <|> (ValueInteger <$> decimal)
+     -- <|> {-ValueS <$> quotedString-}
 {-# INLINE value #-}
 
+--------------------------------------------------------------------------------
 -- KEYWORD SETS
 
-yaraKeywords :: Set.Set ByteString
-yaraKeywords = Set.fromDistinctAscList [
+yaraKeywords :: Set ByteString
+yaraKeywords = fromDistinctAscList [
    "all"       , "and"       , "any"      , "ascii"      ,
    "at"        , "condition" , "contains" , "entrypoint" ,
    "false"     , "filesize"  , "for"      , "fullword"   ,
@@ -88,7 +83,7 @@ yaraKeywords = Set.fromDistinctAscList [
    "uint32be"  , "uint8"     , "uint8be"  , "wide"       ]
 
 isKeyword :: ByteString -> Bool
-isKeyword = flip Set.member yaraKeywords
+isKeyword = flip member yaraKeywords
 -- IDENTIFIERS
 
 
@@ -136,16 +131,14 @@ _identifier = do
 identifier :: Yp ByteString
 identifier = do
   i <- _identifier
-  b <- isDot <$> peekByte
   -- If the next byte is a dot, may be trying to import a module.
   -- Parse another identifier and check if it was imported
-  if b
-    then do -- Ensure that possible module is an imported one.
-      m <- reader imports
-      if Set.member i m
-        then dot *> _identifier
-        else badModule i
-    else pure i
+  ifM (isDot <$> peekByte)
+      (do m <- reader imports
+          if Set.member i m
+            then dot *> _identifier
+            else badModule i )
+      (pure i)
   <?> "identifier"
 {-# INLINE identifier #-}
 
@@ -314,7 +307,7 @@ range = do
   closeParen
 -}
 
-
+{-
 
 -- |
 --
@@ -357,14 +350,7 @@ ruleBlock = do
                       -- <*> ruleStrings
                      --  <*> ruleConditions
                      --  <* closeCurl
-
-data YaraDoc = YaraDoc {
-     docImports  :: Set.Set ByteString
-  ,  docIncludes :: Set.Set ByteString
-  ,  docRules    :: Set.Set YaraRuleBlock
-  }
-data YaraRuleBlock
-
+-}
 {-
 
 preprocess :: FilePath -> IO YaraDoc
