@@ -13,3 +13,9 @@ module Text.Yara.Parsing.Time where
 
 import Yara.Prelude
 
+data NumConTok = Time_Now
+
+toTimeModuleFunction :: ByteString -> Either () NumConTok
+toTimeModuleFunction bs = case bs of
+  "now()" -> Right Time_Now
+  _       -> Left ()

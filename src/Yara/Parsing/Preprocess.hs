@@ -17,11 +17,7 @@ module Yara.Parsing.Preprocess where
 
 import Yara.Prelude
 
-import Control.Exception
-import Control.Monad
-import Data.ByteString.Internal
 import Foreign
-import Foreign.ForeignPtr
 
 -- | @S@ a state token used for `removeComments`
 data S = MaybeComment          -- encountered a '/' in normal text
@@ -47,14 +43,13 @@ removeComments bs@(PS _ _ l) = atomicModification (atomic l) NormalSrc bs
          b <- peekByteOff ptr hare
          let T2 t s = update tort b st
          -- Should be a way to tidy following up. Seems redundant.
+         -- See "textString" for ideas.
          when (st == MaybeComment && b /= 47 && b /= 42)
               (pokeByteOff ptr tort (47::Word8))
          when (s /= MaybeComment && t > tort) (pokeByteOff ptr tort b)
          atomic len s ptr t (hare+1)
     {-# INLINE atomic #-}
 
-    -- `update` modifies state and tortise pointer based on
-    -- current state and focused byte.
     update :: Int -> Byte -> S -> T2 Int S
     update t b NormalSrc = case b of
       47 -> T2 t MaybeComment

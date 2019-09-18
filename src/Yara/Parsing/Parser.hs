@@ -67,7 +67,44 @@ data ExceptionCode
    | TOPLEVELPARSEFAIL
    -- ^
    deriving (Generic, NFData, Show, Eq)
-
+{-static void print_error(
+    int error)
+{
+  switch (error)
+  {
+    case ERROR_SUCCESS:
+      break;
+    case ERROR_COULD_NOT_ATTACH_TO_PROCESS:
+      fprintf(stderr, "can not attach to process (try running as root)\n");
+      break;
+    case ERROR_INSUFFICIENT_MEMORY:
+      fprintf(stderr, "not enough memory\n");
+      break;
+    case ERROR_SCAN_TIMEOUT:
+      fprintf(stderr, "scanning timed out\n");
+      break;
+    case ERROR_COULD_NOT_OPEN_FILE:
+      fprintf(stderr, "could not open file\n");
+      break;
+    case ERROR_UNSUPPORTED_FILE_VERSION:
+      fprintf(stderr, "rules were compiled with a different version of YARA\n");
+      break;
+    case ERROR_CORRUPT_FILE:
+      fprintf(stderr, "corrupt compiled rules file.\n");
+      break;
+    case ERROR_EXEC_STACK_OVERFLOW:
+      fprintf(stderr, "stack overflow while evaluating condition "
+                      "(see --stack-size argument) \n");
+      break;
+    case ERROR_INVALID_EXTERNAL_VARIABLE_TYPE:
+      fprintf(stderr, "invalid type for external variable\n");
+      break;
+    case ERROR_TOO_MANY_MATCHES:
+      fprintf(stderr, "too many matches\n");
+      break;
+    default:
+      fprintf(stderr, "internal error: %d\n", error);
+      break;-}
 instance Default ExceptionCode where
   -- Unspecified thrown exceptions will get recorded as "GenericException"
   -- May demove later
@@ -99,18 +136,16 @@ instance (Show r) => Show (Result r) where
       p = position e
       stamp = mconcat [f, "(", int2bs p, "): " ]
       message = mconcat $ case c of
-        UnterminatedInclude -> ["unterminated include pragma '", m,
-                                "' found in '", f, "'"]
-        FileDoesNotExist -> ["included header file '", m,
-                             "' does not exist"]
-        UnrecognizedPragma -> ["unrecognized pragma '", m]
-        IncorrectlyAlignedPragma -> undefined
-        GenericException         -> ["generic exception ",m," ", int2bs $ position e ]
-        UnterminatedStringLiteral -> ["unterminated string literal"]
-        UnexpectedNewline -> ["unexpected newline"]
-        TOPLEVELPARSEFAIL -> ["toplevelparser fail"]
+        UnterminatedInclude         -> ["unterminated include pragma '", m, "' found in '", f, "'"]
+        FileDoesNotExist            -> ["included header file '", m, "' does not exist"]
+        UnrecognizedPragma          -> ["unrecognized pragma '", m]
+        IncorrectlyAlignedPragma    -> undefined
+        GenericException            -> ["generic exception ",m," ", int2bs $ position e ]
+        UnterminatedStringLiteral   -> ["unterminated string literal"]
+        UnexpectedNewline           -> ["unexpected newline"]
+        TOPLEVELPARSEFAIL           -> ["toplevelparser fail"]
         UnrecognizedEscapeCharacter -> ["Unrecognized escape character ",m]
-        _                         -> ["catchallllll"]
+        _                           -> ["catchallllll"]
      in bs2s $ stamp ++ message
 
 
