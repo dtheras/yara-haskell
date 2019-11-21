@@ -1,4 +1,6 @@
-# yarah
+# yara
+
+Posix 
 
 The [yara homepage](https://virustotal.github.io/yara/) contains the mainstream implimentation of the yara specification (written in C) as well as the spec document itself.
 
@@ -47,47 +49,8 @@ Checklist is a working section, in that parts are added/removed continuously whi
   - [ ] Scan compressed files (ie. yextend)
 
 
-## Language Extensions
-
-These following languages are all standard and turned on universally in the code base.
-- MultiParamTypeClasses
-- PolyKinds
-- RankNTypes
-- InstanceSigs
-- DeriveTraversable
-- DeriveFoldable
-- QuasiQuotes
-- TemplateHaskell
-- ScopedTypeVariables
-- StandaloneDeriving
-- ViewPatterns
-- TypeSynonymInstances
-- ConstraintKinds
-- MultiWayIf
-- LambdaCase
-- TypeFamilies
-- PatternSynonyms
-- PatternGuards
-- DataKinds
-- GADTs
-- TypeOperators
-- KindSignatures
-- FlexibleInstances
-- FlexibleContexts
-- FunctionalDependencies
-- DeriveGeneric
-- DeriveFunctor
-- BangPatterns
-- OverloadedLists
-- NoImplicitPrelude
-- OverloadedStrings
-- TupleSections
-- UnboxedTuples
-- UnboxedSums
-- GeneralizedNewtypeDeriving
-- ApplicativeDo
-- DeriveAnyClass
-- DeriveLift
-
 It is a hastle during development to constantly turn these on and off as needed. 
 
+## Contributing
+
+### Language Extensions
