@@ -1,14 +1,13 @@
 -- |
 -- Module      :  Yara.Prelude
--- Copyright   :  David Heras 2018-2019
+-- Copyright   :  David Heras 2019
 -- License     :  GPL-3
 --
 -- Maintainer  :  dheras@protonmail.com
 -- Stability   :  experimental
 -- Portability :  unknown
 --
--- Local prelude replacement (the extension
--- NoImplicitPrelude is enabled globally).
+-- Local prelude replacement (-XNoImplicitPrelude enabled globally).
 --
 -- See Yara.Prelude.Internal for design targets.
 --

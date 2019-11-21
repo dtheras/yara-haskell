@@ -1,10 +1,11 @@
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE NoImplicitPrelude #-}
-{-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 {-# OPTIONS_GHC -Wno-orphans #-} -- quiets ghc over Semigroup instance for Bool
 -- |
@@ -16,62 +17,71 @@
 -- Stability   :  experimental
 -- Portability :  unknown
 --
--- Shared plumbing for internal prelude files.
---
--- SHOULD NOT be imported directly, only for source files contained
--- within the folder "Yara//Prelude//Internal/". Please use "Yara.Prelude"
--- instead.
+-- Local prelude. Not to be imported directly; use "Yara.Prelude".
 --
 -- Prelude design targets/parameters:
---
+--   o sensible defaults
+--   o contain code reused across sections
+--   o ByteString oriented
+--   o yara spec constants/fixed parameters
 --
 module Yara.Prelude.Internal (
     module Yara.Prelude.Internal
   , module Export
   ) where
 
--- Re-exports
+-- | Rexported modules
 import Control.DeepSeq            as Export
 import Control.Exception          as Export
 import Control.Monad              as Export
+import Control.Monad.Combinators  as Export hiding (between, many, some)
 import Control.Monad.Except       as Export
 import Control.Monad.Extra        as Export hiding (unit)
 import Control.Monad.Reader       as Export
 import Control.Monad.State.Strict as Export
-import Data.Bool                  as Export
+import Data.Bool                  as Export hiding (bool)
 import Data.ByteString            as Export hiding (map, concat, any, foldr,
   foldl, foldl1, foldr1, foldl', foldr', all, maximum, minimum, notElem,
-  empty, null, elem, takeWhile, count, putStrLn)
+  empty, null, elem, takeWhile, count, putStrLn, intercalate)
 import Data.ByteString.Char8      as Export (putStrLn)
 import Data.ByteString.Internal   as Export (ByteString(..),
-  accursedUnutterablePerformIO)
+  accursedUnutterablePerformIO, memcpy)
+import Data.ByteString.Short      as Export (ShortByteString, toShort,
+  fromShort)
+import Data.ByteString.Unsafe     as Export
 import Data.Default               as Export
 import Data.Either                as Export
 import Data.Foldable              as Export hiding (length, find, concatMap)
 import Data.Function              as Export
 import Data.Functor               as Export
+import Data.Hashable              as Export
 import Data.Maybe                 as Export
-import Data.Semigroup             as Export hiding (Any)
+import Data.Scientific            as Export
+import Data.Semigroup             as Export hiding (Any, option)
 import Data.Typeable              as Export
 import Data.Tuple                 as Export
 import Data.Word                  as Export
+import Foreign                    as Export hiding (void)
+import Foreign.Ptr                as Export
 import GHC.Base                   as Export hiding (sequence, liftA2, foldr,
   (++), mapM)
+import GHC.ForeignPtr             as Export
 import GHC.Generics               as Export (Generic)
 import GHC.Num                    as Export
-import GHC.Real                   as Export
+import GHC.Real                   as Export hiding (odd)
 import GHC.Show                   as Export
 
--- Local imports
-import qualified Data.ByteString as B
+
+import qualified Data.ByteString as B hiding (intercalate)
+import qualified Data.ByteString.Short as S
 import Data.ByteString.Builder
-import qualified Data.ByteString.Char8 as C8
+import qualified Data.ByteString.Char8 as C8 hiding (intercalate)
 import qualified Data.ByteString.Lazy as BL
 import Data.ByteString.Unsafe
 import Data.Default
 import qualified Data.Foldable as F
-import qualified Data.HashMap.Strict as H
-import qualified Data.HashSet as S
+import qualified Data.HashMap.Strict as HM
+import qualified Data.HashSet as HS
 import Foreign hiding (void)
 
 infixl 6 ~+, ~-
@@ -86,16 +96,25 @@ type Byte = Word8
 -- | A bit neater than "RawFilePath"
 type FilePath = ByteString
 
+-- | Strict, unpacked tuple. 
+data T2 a s = T2 {-# UNPACK #-} !a  {-# UNPACK #-} !s
+
+instance (Show a, Show s) => Show (T2 a s) where
+  show (T2 x y) = concat ["T2(",show x,",",show y,")"]
+
 -- | @<> := ||@.
 -- Simplifies writing bool checks:
 -- (\b -> b <= 10 || b == 20 || b >= 30)  <=>  (<=10) <> (==20) <> (>=30)
 instance Semigroup Bool where
   (<>) = (||)
 
-instance Default (H.HashMap k v) where
-  def = H.empty
+instance Default (HM.HashMap k v) where
+  def = HM.empty
 
-instance Default (S.HashSet v) where
+instance Default (HS.HashSet v) where
+  def = HS.empty
+
+instance Default S.ShortByteString where
   def = S.empty
 
 ------------------------------------------------------------
@@ -130,37 +149,6 @@ onPosix = not onWindows
 (~-) = minusPtr
 {-# INLINE (~-) #-}
 
---------------------------------------------------------------------------------
--- Strict/Unpacked Tuples
-
--- Note: the -funbox-strict-fields lets us to omit the UNPACK pragmas
---
--- The following reasoning was used in choosing using.
---
---  * [To the extent of my knowledge] The fusion optimization GHC does in
---    eliminating intermediate tuples is in the following case:
---      > f (a,b) = f' a b
---      > f' a b = doSomething
---    In those cases, we use normal tuples since syntactically its nicer
---    and computationally irrevant. However, quite often there is the
---    following:
---    > someFun = do
---    >   (a,b) <- crazyComputation
---    >   if | f a -> doFirstBranch
---    >      | h b -> doSecondBranch
---    Ostensibly there is much bigger step in the code that would prevent
---    fusion. In reality, the compiler may still be able to optimize that
---    away. No information has been found, and we have yet to be able to
---    test.
---
---  * Unboxed tuples are very nice, sytactically convinent but have two
---    limitations.
---
---    Again, it is unknown the speed gains.
-data T2 a s = T2 !a !s
-
-data T3 a b s = T3 !a !b !s
-
 -------------------------------------------------------------------
 -- Byte predicates
 
@@ -182,6 +170,7 @@ GO(isHexByte,\b-> (b>=48 && b<=57) || (b>=97 && b<=102) || (b>=65 && b<=70))
 GO(isUnderscore,(== 95))
 GO(isLeadingByte,isAlpha <> isUnderscore)
 GO(isIdByte,isAlphaNum <> isUnderscore)
+GO(isRegexByte,(\w -> w-92 <= 2 || w-123 <= 2 || w `elem` [36,40,41,43,46] ))
 #undef GO
 
 -------------------------------------------------------------------
@@ -236,6 +225,15 @@ bs2s :: ByteString -> [Char]
 bs2s = C8.unpack
 {-# INLINE bs2s #-}
 
+-- May remove the following. We should be operating faster.
+unpackSBS :: ShortByteString -> [Word8]
+unpackSBS = S.unpack
+{-# INLINE unpackSBS #-}
+
+packSBS :: [Word8] -> ShortByteString
+packSBS = S.pack
+{-# INLINE packSBS #-}
+
 -- | @int2bs@ converts an int to a bytestring.
 --
 -- @VERY SLOW@ Uses the really slow 'toStrict', but even if parsing
@@ -267,7 +265,7 @@ dropEndWhile k (PS x s l) =
       go (f ~+ (s+l-1)) 0
   where
     go !ptr !n
-      | n >= l    = def
+      | n >= l    = pure def
       | otherwise = do
          w <- peek ptr
          if k w
@@ -286,7 +284,7 @@ takeEndWhile k (PS x s l) =
     withForeignPtr x $ \f -> go (f ~+ (s+l-1)) 0
   where
     go !ptr !n
-      | n >= l    = def
+      | n >= l    = pure def
       | otherwise = do
           w <- peek ptr
           if k w
@@ -325,9 +323,9 @@ toShows x = showChar ' ' . showsPrec 11 x
 
 uncons2 :: ByteString -> Maybe (Byte, Byte, ByteString)
 uncons2 x@(PS _ _ l)
-    | l <= 1    = Nothing
-    | otherwise = assert (l > 1) $
-        Just (unsafeIndex x 0, unsafeIndex x 1, unsafeDrop 2 x)
+  | l <= 1    = Nothing
+  | otherwise = assert (l > 1) $
+      Just (unsafeIndex x 0, unsafeIndex x 1, unsafeDrop 2 x)
 {-# INLINE uncons2 #-}
 
 -- | unsafeHead2 the first two bytes of a bytestring and return them
@@ -360,40 +358,22 @@ atomicModification atomic s0 (PS fp off len) =
     (t,s) <- withForeignPtr fp $ \a -> atomic s0 (a ~+ off) 0 0
     assert (t <= len) $! pure (PS fp 0 t, s)
 
-----------------------
--- Contants
-
-#define CO(label,val) label :: Word64; label = val; {-# INLINE label #-}
-CO(defaultMaxTags,32)
-CO(defaultMaxIdentifiers,32)
-CO(defaultMaxExternalVariables,32)
-CO(defaultMaxModuleData,32)
-CO(defaultMaxQueuedFiles,64)
-#undef CO
-
--------------------------
--- Keywords
-
-yaraKeywords :: H.HashSet ByteString
-yaraKeywords = [
-   "all"       , "and"       , "any"      , "ascii"      ,
-   "at"        , "condition" , "contains" , "entrypoint" ,
-   "false"     , "filesize"  , "for"      , "fullword"   ,
-   "global"    , "import"    , "in"       , "include"    ,
-   "int16"     , "int16be"   , "int32"    , "int32be"    ,
-   "int8"      , "int8be"    , "matches"  , "meta"       ,
-   "nocase"    , "not"       , "of"       , "or"         ,
-   "private"   , "rule"      , "strings"  , "them"       ,
-   "true"      , "uint16"    , "uint16be" , "uint32"     ,
-   "uint32be"  , "uint8"     , "uint8be"  , "wide"       ]
-
-isKeyword :: ByteString -> Bool
-isKeyword = flip member yaraKeywords
+intercalate :: Monoid m => m -> [m] -> m
+intercalate _ []     = mempty
+intercalate s (x:xs) = foldl (\a b -> a `mappend` s `mappend` b) x xs
+{-# INLINABLE intercalate #-}
+{-# SPECIALIZE Yara.Prelude.Internal.intercalate :: ByteString
+                                                 -> [ByteString]
+                                                 -> ByteString        #-}
+{-# SPECIALIZE Yara.Prelude.Internal.intercalate :: ShortByteString
+                                                 -> [ShortByteString]
+                                                 -> ShortByteString   #-}
 
 ------------------------------------------------------------
 -- Misc.
 
--- | Alias for 'length' of Foldables using the math terminology of 'cardinality'
+-- | Alias for 'length' of Foldables using the mathematical terminology
+-- of 'cardinality'. Avoids namespace collision.
 cardinality :: Foldable f => f a -> Int
 cardinality = F.length
 {-# INLINE cardinality #-}
@@ -414,5 +394,10 @@ unit = pure ()
 (>>?) = catchError
 {-# INLINE (>>?) #-}
 
-asumMap :: (Alternative m, Foldable f) => (a -> m b) -> f a -> m b
+($/) :: (a -> b -> c) -> b -> a -> c
+($/) f x y = f y x
+{-# INLINE ($/) #-}
+
+asumMap :: (Alternative p, Foldable f) => (a -> p b) -> f a -> p b
 asumMap f = foldr ((<|>) . f) empty
+{-# INLINE asumMap #-}

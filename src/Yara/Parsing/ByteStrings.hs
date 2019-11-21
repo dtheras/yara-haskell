@@ -4,11 +4,12 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 -- |
 -- Module      :  Yara.Parsing.ByteStrings
--- Copyright   :  David Heras 2018-2019
+-- Copyright   :  David Heras 2019
 -- License     :  GPL-3
 --
 -- Maintainer  :  dheras@protonmail.com
@@ -20,13 +21,12 @@
 module Yara.Parsing.ByteStrings where
 
 import Yara.Prelude
+import Yara.Parsing.AST
 import Yara.Parsing.Combinators
-import Yara.Parsing.Constants
 import Yara.Parsing.Parser
 
-import Foreign
-import Data.ByteString.Unsafe
-import qualified Data.HashMap.Strict as H
+import qualified Data.HashMap.Strict as HM
+import qualified Data.HashSet as HS
 
 -- | A stateful scanner.  The predicate consumes and transforms a
 -- state argument, and each transformed state is passed to successive
@@ -40,23 +40,23 @@ import qualified Data.HashMap.Strict as H
 -- combinators such as 'Control.Applicative.many', because such
 -- parsers loop until a failure occurs.  Careless use will thus result
 -- in an infinite loop.
-scan :: s -> (s -> Byte -> Maybe s) -> Yp ByteString
+scan :: st -> (st -> Byte -> Maybe st) -> Yp s ByteString
 scan s0 p = scan_ id (\_ y -> pure y) p s0 <?> "scan"
 {-# INLINE scan #-}
 
-scanSt :: s -> (s -> Byte -> Maybe s) -> Yp (s, ByteString)
+scanSt :: st -> (st -> Byte -> Maybe st) -> Yp s (st, ByteString)
 scanSt s0 p = scan_ id (curry pure) p s0 <?> "scanSt"
 {-# INLINE scanSt #-}
 
 scan_ :: (Byte -> Byte)
-       -- ^ How to transform byte as scanning?
-       -> (s -> ByteString -> Yp r)
-       -- ^ Do what with the final state and parsed bytestring?
-       -> (s -> Byte -> Maybe s)
-       -- ^ State Transformation
-       -> s
-       -- ^ Initial state value
-       -> Yp r
+      -- ^ How to transform byte as scanning?
+      -> (st -> ByteString -> Yp s r)
+      -- ^ Do what with the final state and parsed bytestring?
+      -> (st -> Byte -> Maybe st)
+      -- ^ State Transformation
+      -> st
+      -- ^ Initial state value
+      -> Yp s r
 scan_ shift !ret !rho !s0 = do
   bs@(PS fp off len) <- getBuff
   let T2 i u = accursedUnutterablePerformIO $
@@ -139,9 +139,6 @@ updateState _ _ s@(TSUnrecHex _) = s
 updateState _ _ s@(TSFin _)      = s
 {-# INLINE updateState #-}
 
--- [*] The inner loop @atomic@ below is identical
--- to 'removeComments' from "Yara.Parser.Preprocess." See
--- that for documentation.
 -- | @textString@ parses a string literal.
 --
 -- Text strings can contain the following
@@ -153,7 +150,8 @@ updateState _ _ s@(TSFin _)      = s
 --   \n     New line
 --   \xdd   Any byte in hexadecimal notation
 --
-textStringWith :: (Byte -> Bool) -> Yp ByteString
+-- Parser fails if the predicate fails.
+textStringWith :: (Byte -> Bool) -> Yp s ByteString
 textStringWith pred = do
   bs <- quote *> getNormalizedBuff
   let atomic :: TSTok -> Ptr Byte -> Int -> Int -> IO (Int, TSTok)
@@ -173,7 +171,9 @@ textStringWith pred = do
              | otherwise      -> pure tort
            atomic st ptr t (hare+1)
       {-# INLINE atomic #-}
+      --
       (b,s) = atomicModification atomic TSNorm bs
+
   case s of
     TSFin n      -> advance n $> b
     TSBadNewLn   -> fault UnexpectedNewline "unexpected new line found"
@@ -183,21 +183,23 @@ textStringWith pred = do
                      39 <+ v <+ "' not a permitted escape character"
     TSBadByte v  -> fault UnrecognizedEscapeCharacter $
                      39 <+ v <+ "' failed the predicate"
-    _            -> fault_ "here"
+    _            -> fault InternalError "here"
   <?> "stringLiteral"
 {-# INLINABLE textStringWith #-}
 
-textString :: Yp ByteString
+-- [* atomicModification] The core loop logic for @atomic@ is
+-- identical to 'removeComments' from "Yara.Parser.Preprocess."
+-- See that for documentation.
+textString :: Yp s ByteString
 textString = textStringWith $ \_ -> True
 {-# INLINE textString #-}
-
 
 ----------------------------
 -- Identifiers
 
 -- possiby temporary. does the parsing of an identifier
 -- but doesnt check if imported. very helpful.
-_identifier :: Yp ByteString
+_identifier :: Yp s ByteString
 _identifier = do
   r <- scan 0 rho
   let i = head r
@@ -205,13 +207,16 @@ _identifier = do
   if -- If the following byte is an id byte then identifier is illegal
      | isIdByte b -> do
          rest <- takeWhile isIdByte
-         fault_ $ "Illegal identifier (must be <128 bytes): " ++ r ++ rest
+         fault IndentifierOverflow $ "Illegal identifier (must be <128 bytes): " ++ r ++ rest
      -- Keywords are not acceptable
-     | isKeyword r -> fault_ $ "Identifier cannot be a keyword: '" ++ r ++ "'"
+     | isKeyword ({-toShort-} r) ->
+         fault InvalidIdentifier $ "Identifier cannot be a keyword: '" ++ r ++ "'"
      -- Simply an underscore or digit is not an acceptable identifier
-     | length r <= 1 -> fault_ $ "Unacceptable identifier: " ++ r
+     | length r <= 1 ->
+         fault InvalidIdentifier $ "Unacceptable identifier: " ++ r
      -- Otherwise, we have an acceptable identifier
-     | otherwise   -> pure r
+     | otherwise   ->
+         pure r
   <?> "_identifier"
   where
     rho :: Int -> Byte -> Maybe Int
@@ -223,6 +228,35 @@ _identifier = do
       | isIdByte b              = Just $ n+1
       | otherwise               = Nothing
 {-# INLINE _identifier #-}
+
+-- | Parse an identifier that isn't "imported," ie. is not module name
+-- trailed by a '.' trailed by an identifier
+identifierNoImport :: Yp s ByteString
+identifierNoImport = do
+  l <- _identifier
+  --s <- getStrings
+  pure l
+{-}  if l `Map.member` s
+    then pure l
+    else fault $ "String not in scope: " ++ l-}
+{-# INLINE identifierNoImport #-}
+
+-- | Parse an identifier preceeded by a '$'
+-- Returns only the identifier.
+label :: Yp s ByteString
+label = liftA2 seq dollar identifierNoImport
+{-# INLINE label #-}
+
+type YaraParser a = Yp YaraParserState a
+
+data YaraParserState = YPS {
+    imports :: HM.HashMap ByteString ByteString
+  , localPatterns :: Patterns
+  }
+
+getImports :: YaraParser (HM.HashMap ByteString ByteString)
+getImports = imports <$> get
+{-# INLINE getImports #-}
 
 -- | Parses an identifier.
 --
@@ -237,35 +271,29 @@ _identifier = do
 --
 -- We additionally imposed that identifiers cannot be a single number or
 -- just an underscore for the time being, due to parsing issues.
-identifier :: Yp ByteString
+identifier :: YaraParser ByteString
 identifier = do
   i <- _identifier
   -- If the next byte is a dot, may be trying to import a module.
   -- Parse another identifier and check if it was imported
   ifM (isDot <$> peekByte)
-      (do m <- getImports
-          if H.member i m
-            then dot *> _identifier
-            else badModule i )
+      (ifM (HM.member i <$> getImports)
+           (dot *> _identifier)
+           $ badModule i)
       (pure i)
   <?> "identifier"
   where badModule = undefined
 {-# INLINE identifier #-}
 
--- | Parse an identifier that isn't "imported," ie. is not module name
--- trailed by a '.' trailed by an identifier
-identifierNoImport :: Yp ByteString
-identifierNoImport = do
-  l <- _identifier
-  --s <- getStrings
-  pure l
-{-}  if l `Map.member` s
-    then pure l
-    else fault $ "String not in scope: " ++ l-}
-{-# INLINE identifierNoImport #-}
-
--- | Parse an identifier preceeded by a '$'
--- Returns only the identifier.
-label :: Yp ByteString
-label = liftA2 seq dollarSign identifierNoImport
-{-# INLINE label #-}
+isKeyword :: ByteString -> Bool
+isKeyword = flip HS.member [
+   "all"       , "and"       , "any"      , "ascii"      ,
+   "at"        , "condition" , "contains" , "entrypoint" ,
+   "false"     , "filesize"  , "for"      , "fullword"   ,
+   "global"    , "import"    , "in"       , "include"    ,
+   "int16"     , "int16be"   , "int32"    , "int32be"    ,
+   "int8"      , "int8be"    , "matches"  , "meta"       ,
+   "nocase"    , "not"       , "of"       , "or"         ,
+   "private"   , "rule"      , "strings"  , "them"       ,
+   "true"      , "uint16"    , "uint16be" , "uint32"     ,
+   "uint32be"  , "uint8"     , "uint8be"  , "wide"       ]

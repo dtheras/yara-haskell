@@ -3,30 +3,29 @@
 {-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
+{-# OPTIONS_GHC -Wno-unused-do-bind #-}
 -- |
 -- Module      :  Yara.Parsing.Patterns
--- Copyright   :  David Heras 2018-2019
+-- Copyright   :  David Heras 2019
 -- License     :  GPL-3
 --
 -- Maintainer  :  dheras@protonmail.com
 -- Stability   :  experimental
 -- Portability :  unknown
 --
--- YARA rules contain 3 types of strings:
--- * Hexadecimal strings
--- * Text strings
--- * Regular expressions
--- These are the following modifiers for "text strings"
--- * wide
--- * xor
--- * nocase
--- * acsii
--- * fullword
+-- Parser combinators for 3 types of string patterns contained in
+-- yara rules (See Section 2.2 of the yara spec).
 --
-module Yara.Parsing.Patterns ( parsePatterns ) where
+-- TODO: 'hexBound'. Easy, just being a bit of a thorn.
+--
+module Yara.Parsing.Patterns (
+    parsePatterns -- :: Yp s Patterns
+  ) where
 
 import Yara.Prelude
 import Yara.Parsing.AST
@@ -34,109 +33,202 @@ import Yara.Parsing.ByteStrings
 import Yara.Parsing.Combinators
 import Yara.Parsing.Parser
 
-import Data.ByteString.Unsafe
-import Data.Maybe
-import qualified Data.HashMap.Strict as H
-import qualified Data.HashSet as S
+import qualified Data.HashMap.Strict as HM
+import qualified Data.Set as S
 
-textPattern :: Yp Pattern
-textPattern = do
-  s <- textString
-  w <- seek $ sepByHashSet keyWords space1
-  pure $ StringPattern s w
-  where keyWords =
-          asum [string "ascii", string "wide", string "nocase"]
+------------------------------------------------------------------------
+-- Text & Regex Patterns
 
-------------------
--- Hex Strings
+data Modifications = Modifications {
+    ascii_    :: ByteString -> ByteString
+  , fullword_ :: ByteString -> ByteString
+  , nocase_   :: ByteString -> ByteString
+  , wide_     :: ByteString -> ByteString
+  , xor_      :: Maybe (T2 Byte Byte)
+  , private_  :: Bool
+  }
 
-hexPattern :: Yp Pattern
-hexPattern =
-  HexPattern <$> (between oCurly cCurly $
-      sepBy1 (hexSubPatStr <|> hexSubPatGrp) spaces)
-  <?> "hexPattern"
+instance Default Modifications where
+  -- The yara spec never specifies what the
+  -- "ascii" keyword does; set as 'id' placeholder.
+  def = Modifications id id id id Nothing False
+
+-- | `hasPattern` returns whether or not a string label matches the
+-- name of an inscope pattern.
+hasPattern :: ByteString -> Patterns -> Bool
+hasPattern bs Patterns{..} = HM.member bs stdPatterns
+{-# INLINE hasPattern #-}
+
+-- | `patterModifiers` parses the set of pattern modifiers for
+-- regex and text patterns.
+patternModifiers :: Yp s Modifications
+patternModifiers = do
+  r <- seek $ sepByAcc keyword (void space1)
+  notFollowedBy isAlpha
+  pure r
+  <?> "patternModifiers"
   where
-    hexPair :: Yp HexToken
-    hexPair = liftA2 HexPair hexDigit hexDigit
-      where hexDigit = satisfy $ (==63) <> isHexByte
-            {-# INLINE hexDigit #-}
-    {-# INLINE hexPair #-}
+    mkNocase, mkFullword, mkWide :: ByteString -> ByteString
+    mkNocase bs = bs ++ "i"
+    mkFullword bs = "[^[:alnum:]]{1}" ++ bs ++ "[^[:alnum:]]{1}"
+    mkWide bs = intersperse 0 bs
 
-    hexJump :: Yp HexToken
-    hexJump = between sqBra sqKet $ do
-      l <- seek $ perhaps decimal
-      seek dash
-      u <- seek $ perhaps decimal
-      if | Just False <- liftA2 (<) l u           -> badBounds
-         | isNothing u, Just False <- (==0) <$> l -> badBounds
-         | otherwise                              -> pure $ HexJump l u
-      where
-        badBounds = fault BadRangeBounds
-           "found bad hex-pattern range, must be lower <= upper"
-    {-# INLINE hexJump #-}
+    xor :: Yp s (Modifications -> Modifications)
+    xor = do
+      string "xor"
+      let hexBound :: Yp s Byte
+          hexBound = undefined
+      r <- (Just <$> tuple hexBound) <|> notFollowedBy isAlpha $> Nothing
+      pure $ \m -> m { xor_ = r }
 
-    hexSubPatStr :: Yp HexSubPattern
-    hexSubPatStr = HexString <$> sepBy1 (hexPair <|> hexJump) space1
-    {-# INLINABLE hexSubPatStr #-}
+    keyword :: Yp s (Modifications -> Modifications)
+    keyword = xor <|> tokens [
+        T2 "ascii"    id --(\m -> m { ascii    = id         })
+      , T2 "fullword" (\m -> m { fullword_ = mkFullword })
+      , T2 "nocase"   (\m -> m { nocase_   = mkNocase   })
+      , T2 "wide"     (\m -> m { wide_     = mkWide     })
+      , T2 "private"  (\m -> m { private_  = True       })
+      ] <?> "keyword"
 
-    hexSubPatGrp :: Yp HexSubPattern
-    hexSubPatGrp = HexGrouping <$> (between oParen cParen $
-                        sepBy1 hexSubPatStr (seek vertBar *> spaces))
-    {-# INLINABLE hexSubPatGrp #-}
+-- | Converts a pattern with its modifications to regex
+toRegex :: ByteString -> Modifications -> Pattern
+toRegex b Modifications{..} = Pattern (nocase_ $ fullword_ $ wide_ b) private_
+{-# INLINE toRegex #-}
+-- TODO: impliment xor
+-- Per the spec, the xor-condition applied last
 
--------------------
--- Regex Patterns
+-- | Parse a text string pattern
+textPattern :: Yp s Pattern
+textPattern = liftA2 toRegex textString patternModifiers <?> "text pattern"
 
 -- | Parse a regex string pattern
-regexPattern :: Yp Pattern
--- 1) Opens with a forward slash '/'
--- 2) Scan source until unescaped forward slash '/' is encountered
-regexPattern = do
-  fSlash *> scan False p <&> RegexPattern . unsafeInit
-  <?> "error building regex map"
-  where p s w | s && w /= 47  = Nothing
-              | w == 47       = Just True
-              | otherwise     = Just False
+regexPattern :: Yp s Pattern
+regexPattern = liftA2 toRegex regexPat patternModifiers <?> "regex pattern"
+  where -- 1) Open regex with a forward slash '/'
+        -- 2) Scan source until unescaped forward slash '/' is encountered
+    p s w | s && w /= 47  = Nothing
+          | w == 47       = Just True
+          | otherwise     = Just False
+    regexPat :: Yp s ByteString
+    regexPat = fSlash *> scan False p <&> unsafeInit
 
------------------------
--- Parse patterns
+------------------------------------------------------------------------
+-- Hex Patterns
 
-putPatterns :: (Patterns -> Patterns) -> Yp ()
-putPatterns f = modify $ \s ->
-  let p = localPatterns s in s {localPatterns = f p}
-{-# INLINE putPatterns #-}
+-- | 'lessthan'
+-- Compares two bytestrings as if they were natural numbers,
+-- rather than strings. Written to serve specific situation
+-- below so its minimally robust.
+--
+-- The default 'Ord' instance for example would yield:
+--    "1" < "5"  == True
+--    "5" < "10" == False
+--
+-- 'bsLessthan' fixes this so that:
+--    "1" < "5"  == True
+--    "5" < "10" == True
+--
+-- * Really writen to serve our specific purpose.
+-- * Handles leading zeros.
+-- * Doesn't handle negatives and will generally
+--     give wrong results.
+-- * ASSUMES BYTES ARE DIGITS ALREADY
+--     Doesn't check that the bytes are digits,
+--     so anything will just pass through and
+--     may provide bad results.
+--
+lessthan :: ByteString -> ByteString -> Bool
+lessthan b1 b2
+  | (PS p1 o1 l1) <- dropLeadingZeros b1 -- so the first number
+  , (PS p2 o2 l2) <- dropLeadingZeros b2 -- is always >0
+  = let lessthan_ :: Int -> IO Bool
+        lessthan_ c = do             -- Need disambiguate type of stored value
+          w_1 <- withForeignPtr p1 $ \p -> peekByteOff p (o1 + c) :: IO Word8
+          w_2 <- withForeignPtr p2 $ \p -> peekByteOff p (o2 + c)
+          if | w_1 >= w_2 -> pure False
+             | c == l1    -> pure True
+             | otherwise  -> lessthan_ (c+1)
+    in if
+      | l1 > l2   -> False -- If the first string is longer, we are done.
+      | l2 > l1   -> True  -- If the second string is longer, we are done.
+      | otherwise -> accursedUnutterablePerformIO $ lessthan_ 0
+  where
+    dropLeadingZeros = dropWhile (==48)
+{-# INLINABLE lessthan #-}
 
-putStdPattern :: ByteString -> Pattern -> Yp ()
-putStdPattern v k = putPatterns $ \s ->
-  let p = stdPatterns s in s {stdPatterns = H.insert v k p}
-{-# INLINABLE putStdPattern #-}
-putAnonPattern :: Pattern -> Yp ()
-putAnonPattern a = putPatterns $ \s ->
-  let p = anonPatterns s in s {anonPatterns = S.insert a p}
-{-# INLINABLE putAnonPattern #-}
+hexPair :: Yp s ByteString
+hexPair = do
+  h1 <- hexDigit
+  h2 <- hexDigit
+  pure $ if
+    | h1 == 63, h2 == 63 -> "[\\d|\\D]" -- '??' means match any byte
+    | h1 == 63           -> "[\\x[a-f0-9A-F]" ++ sig h2 ++ "]"
+    | h2 == 63           -> "[\\x" ++ sig h1 ++ "[0-9a-fA-F]]"
+    | otherwise          -> "[\\x" ++ pack [h1,h2] ++ "]"
+  <?>  "hexPair"
+  where hexDigit = satisfy $ (==63) <> isHexByte
+        {-# INLINE hexDigit #-}
+{-# INLINABLE hexPair #-}
 
-parsePattern :: Yp ()
+hexRange :: Yp s ByteString
+hexRange = do
+  (T2 l u) <- range $ takeWhile isDigit -- No need to "read" in values
+  let ret bs = pure $ "[\\d\\D]" ++ bs
+  if | isEmpty u
+        , isEmpty l -> ret $ "*"
+     | isEmpty u    -> ret $ "{" ++ l ++ ",}"
+     | isEmpty l    -> ret $ "{0," ++ u ++ "}"
+     | u == l       -> ret $ "{" ++ l ++ "}"
+     | lessthan u l -> fault BadRangeBounds
+         "found bad hex-pattern range, must be lower <= upper"
+     | otherwise    -> ret $ "{" ++ l ++ "," ++ u ++ "}"
+  <?> "hexRange"
+{-# INLINABLE hexRange #-}
+
+hexJump :: Yp s ByteString
+hexJump = between sqBra sqKet $ do
+  j <- takeWhile isDigit
+  if isEmpty j
+    then fault BadRangeBounds
+           "found bad hex-pattern range, single must be defined"
+    else pure $ "[\\d\\D]{" ++ j ++ "}"
+  <?> "hexJump"
+{-# INLINABLE hexJump #-}
+
+hexPattern :: Yp s Pattern
+hexPattern = do
+  h <- between oCurly cCurly $ grouped spaces (hexTokens <|> hexSubPatGrp)
+  s <- seek $ optional (sepBy1 (void "private") space1)
+  pure $ Pattern (fold h) (isJust s)
+  <?> "hexPattern"
+  where
+    hexTokens = fold <$> sepBy1 (hexPair <|> hexJump <|> hexRange) spaces
+    {-# INLINABLE hexTokens #-}
+    hexSubPatGrp = do
+      h <- grouped vertBar hexTokens
+      pure $ "(" ++ intercalate "|" h ++ ")"
+    {-# INLINABLE hexSubPatGrp #-}
+{-# INLINABLE hexPattern #-}
+
+------------------------------------------------------------------------
+-- Parse Patterns
+
+parsePattern :: Yp s (Patterns -> Patterns)
 parsePattern = seek $ do
-  dollarSign
-  i <- perhaps _identifier
+  i <- dollar *> optional _identifier
   seek equal
   s <- seek $ textPattern <|> regexPattern <|> hexPattern
-  maybe (putAnonPattern s) (flip putStdPattern s) i
+  pure $ case i of
+    Nothing -> \m ->
+      let p = anonPatterns m in m {anonPatterns = S.insert s p}
+    Just f  -> \m ->
+      let p = stdPatterns m in m {stdPatterns = HM.insert f s p}
   <?> "parserPattern"
-{-# INLINE parsePattern #-}
+{-# INLINABLE parsePattern #-}
 
-parsePatterns :: Yp ()
+parsePatterns :: Yp s Patterns
 parsePatterns = do
   string "strings:"
-  seek $ oddSepBy spaces parsePattern
-  where
-    odd !_ !_ = ()
-    {-# INLINE odd #-}
+  seek $ sepByAcc parsePattern (void spaces)
 
-    oddSepBy1 :: Yp a -> Yp s -> Yp ()
-    oddSepBy1 p s = fix $ \go -> liftA2 odd p ((s *> go) `mplus` def)
-    {-# INLINE oddSepBy1 #-}
 
-    oddSepBy :: Yp a -> Yp s -> Yp ()
-    oddSepBy p s = liftA2 odd p ((s *> oddSepBy1 p s) <|> def) <|> def
-    {-# INLINE oddSepBy #-}

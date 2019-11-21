@@ -4,19 +4,24 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE Rank2Types #-}
+{-# LANGUAGE OverloadedLists #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE UnboxedSums #-}
+{-# LANGUAGE UnboxedTuples #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
-{-# OPTIONS_HADDOCK prune             #-}
+{-# OPTIONS_HADDOCK prune #-}
 -- |
 -- Module      :  Yara.Parsing.Parser
--- Copyright   :  David Heras 2018-2019
+-- Copyright   :  David Heras 2019
 -- License     :  GPL-3
 --
--- Maintainer  :  dheras@protonmail.com
+-- Maintainer  :  dheras@protonmail.comk
 -- Stability   :  experimental
 -- Portability :  unknown
 --
@@ -28,157 +33,69 @@ import Yara.Prelude
 import Yara.Parsing.Buffer
 import Yara.Parsing.AST
 
+import qualified Data.HashMap.Strict as H
 import Data.Map.Strict hiding (take)
-import Data.String () -- Only need typeclass instances
-import Data.Typeable
+import Data.String () -- Only need typeclasses
 
-data ExceptionCode
-   = UnterminatedInclude
-   -- ^
-   | FileDoesNotExist
-   -- ^
-   | ExpectedFilePathMissing
-   -- ^
-   | UnrecognizedPragma
-   -- ^
-   | IncorrectlyAlignedPragma
-   -- ^
-   | UnterminatedStringLiteral
-   -- ^
-   | UnexpectedNewline
-   -- ^
-   | UnrecognizedEscapeCharacter
-   -- ^
-   | UnclosedParenthesis
-   -- ^
-   | LonelyOpenParen
-   -- ^
-   | LonelyClosedParen
-   -- ^
-   | EndOfInput
-   -- ^
-   | NotEnoughInput
-   -- ^
-   | OpenBlockComment
-   -- ^ Unterminated block comment
-   | GenericException
-   -- ^
-   | RemainingBufferToShort
-   | TOPLEVELPARSEFAIL
-   -- ^
-   deriving (Generic, NFData, Show, Eq)
-{-static void print_error(
-    int error)
-{
-  switch (error)
-  {
-    case ERROR_SUCCESS:
-      break;
-    case ERROR_COULD_NOT_ATTACH_TO_PROCESS:
-      fprintf(stderr, "can not attach to process (try running as root)\n");
-      break;
-    case ERROR_INSUFFICIENT_MEMORY:
-      fprintf(stderr, "not enough memory\n");
-      break;
-    case ERROR_SCAN_TIMEOUT:
-      fprintf(stderr, "scanning timed out\n");
-      break;
-    case ERROR_COULD_NOT_OPEN_FILE:
-      fprintf(stderr, "could not open file\n");
-      break;
-    case ERROR_UNSUPPORTED_FILE_VERSION:
-      fprintf(stderr, "rules were compiled with a different version of YARA\n");
-      break;
-    case ERROR_CORRUPT_FILE:
-      fprintf(stderr, "corrupt compiled rules file.\n");
-      break;
-    case ERROR_EXEC_STACK_OVERFLOW:
-      fprintf(stderr, "stack overflow while evaluating condition "
-                      "(see --stack-size argument) \n");
-      break;
-    case ERROR_INVALID_EXTERNAL_VARIABLE_TYPE:
-      fprintf(stderr, "invalid type for external variable\n");
-      break;
-    case ERROR_TOO_MANY_MATCHES:
-      fprintf(stderr, "too many matches\n");
-      break;
-    default:
-      fprintf(stderr, "internal error: %d\n", error);
-      break;-}
-instance Default ExceptionCode where
-  -- Unspecified thrown exceptions will get recorded as "GenericException"
-  -- May demove later
-  def = GenericException
+-----------------------------------------------------------------------------
+--
 
--- | A result type for the YP
-data Result r = Fail Env           -- ^ Final Enivronment
-                     ByteString    -- ^ Description of fail situation
-                     ExceptionCode -- ^ Failure code
-              | Done ByteString    -- ^ Remaining input
-                     r             -- ^ Parsed value
-              deriving (Generic)
+data Result s r = Fail Env ByteString s ExceptionCode
+                | Done ByteString r
 
-deriving instance (NFData r) => NFData (Result r)
-
-instance Eq r => Eq (Result r) where
+instance Eq r => Eq (Result s r) where
   (Done b1 r1) == (Done b2 r2) = b1 == b2 && r1 == r2
-  _            == _            = False
+  _         == _               = False
 
-instance (Show r) => Show (Result r) where
+instance (Show s, Show r) => Show (Result s r) where
   show res = case res of
-    (Done m r)   ->
+    (Done m r)  ->
       let rm = bs2s $ if length m > 20
             then take 20 m ++ "..."
             else m
       in mconcat ["Done{ ", show r, " }: \"", rm,"\""]
-    (Fail e m c) -> let
+    (Fail e m s c) -> let
       f = filepath e
       p = position e
       stamp = mconcat [f, "(", int2bs p, "): " ]
       message = mconcat $ case c of
-        UnterminatedInclude         -> ["unterminated include pragma '", m, "' found in '", f, "'"]
-        FileDoesNotExist            -> ["included header file '", m, "' does not exist"]
-        UnrecognizedPragma          -> ["unrecognized pragma '", m]
-        IncorrectlyAlignedPragma    -> undefined
-        GenericException            -> ["generic exception ",m," ", int2bs $ position e ]
-        UnterminatedStringLiteral   -> ["unterminated string literal"]
-        UnexpectedNewline           -> ["unexpected newline"]
-        TOPLEVELPARSEFAIL           -> ["toplevelparser fail"]
-        UnrecognizedEscapeCharacter -> ["Unrecognized escape character ",m]
-        _                           -> ["catchallllll"]
+        UnterminatedInclude
+          -> ["unterminated include pragma '", m, "' found in '", f, "'"]
+        FileDoesNotExist
+          -> ["included header file '", m, "' does not exist"]
+        UnrecognizedPragma
+          -> ["unrecognized pragma '", m]
+        IncorrectlyAlignedPragma
+          -> undefined
+        InternalError
+          -> ["generic exception ",m," ", int2bs $ position e ]
+        UnterminatedStringLiteral
+          -> ["unterminated string literal"]
+        UnexpectedNewline
+          -> ["unexpected newline"]
+        UnrecognizedEscapeCharacter
+          -> ["Unrecognized escape character ",m]
+        UnrecognizedKeyword
+          -> ["Unrecognized keyword: '",m,"' "]
+        _ -> ["catchallllll"]
      in bs2s $ stamp ++ message
-
-
-
 
 -- | `Env` contains the basic state as well as "read-only" information
 data Env = Env {
-     filepath      :: ByteString          -- ^ Filepath of the file being parsed
-  ,  filetype      :: ByteString                -- ^
-  ,  position      :: Pos                       -- ^ Position in buffer.
-  ,  parserLabels  :: [ByteString]              -- ^
-  ,  imports       :: Map ByteString ByteString -- ^ Set of imported modules
-  ,  externalVars  :: Map ByteString Value      -- ^ Externally defined vars
-  ,  localStrings  :: Map ByteString Pattern    -- ^ Inscope strings
-  ,  inscopeRules  :: Map ByteString RuleType   -- ^ Inscope rules
-  } deriving (Show, Generic, NFData)
+    filepath     :: !ByteString
+  , position     :: !Int
+  , committing   :: !Bool
+  , parserLabels :: ![ByteString]
+  } deriving (Show,Generic,NFData)
 
 instance Default Env where
-  def = Env { position = 0
-            , imports = def
-            , parserLabels = def
-            , externalVars = def
-            , localStrings = def
-            , inscopeRules = def
-            , filepath = ""
-            , filetype = ""
-            }
+  def = Env "" 0 False []
 
--- | To annotate
-type Failure r = Env -> ByteString -> ExceptionCode -> Result r
+-- | To annotate.
+type Failure s r = Env -> ByteString -> ExceptionCode -> s -> Result s r
 
--- | To annotate
-type Success a r = Buffer -> Env -> a -> Result r
+-- | To annotate.
+type Success s a r = Env -> Buffer -> a -> Result s r
 
 -- -----------------------------------------------------------------------------
 -- Yara Parser
@@ -217,22 +134,23 @@ type Success a r = Buffer -> Env -> a -> Result r
 --
 -- This is a current compromise/test.
 --
-newtype Yp a = YP {
-  runParser ::
-     forall r. Buffer      -- ^ The bytestring currently being parsed
-            -> Env         -- ^ Current enviroment during parsing
-            -> Failure r   -- ^ Handles a unsuccessful parsing
-            -> Success a r -- ^ Handles a successful parsing
-            -> Result r    -- ^ Outcome of running the parser
-  } deriving Typeable
+newtype Yp s a
+  = YP { runParser :: forall r .
+            Buffer        -- ^ The bytestring currently being parsed
+         -> Env           -- ^ Current enviroment during parsing
+         -> s             -- ^ State
+         -> Failure s r   -- ^ Handles a unsuccessful parsing
+         -> Success s a r -- ^ Handles a successful parsing
+         -> Result s r    -- ^ Outcome of running the parser
+     } deriving Typeable
 
-instance Functor Yp where
-  fmap f par = YP $ \b e l s ->
-    let s_ b_ e_ a_ = s b_ e_ (f a_) in runParser par b e l s_
+instance Functor (Yp s) where
+  fmap f par = YP $ \b e st l s ->
+    let s_ e_ b_ a_ = s e_ b_ (f a_) in runParser par b e st l s_
   {-# INLINE fmap #-}
 
-instance Applicative Yp where
-  pure v = YP $ \b !e _ s -> s b e v
+instance Applicative (Yp s) where
+  pure v = YP $ \b !e _ _ s -> s e b v
   {-# INLINE pure #-}
   w <*> b = do
     !f <- w
@@ -243,10 +161,34 @@ instance Applicative Yp where
   x <* y = x >>= \a -> y $> a
   {-# INLINE (<*) #-}
 
-instance Default a => Default (Yp a) where
+instance Default a => Default (Yp s a) where
   def = pure def
+  {-# INLINE def #-}
 
--- | Version of 'fail' that uses bytestrings instead.
+instance Semigroup a => Semigroup (Yp s a) where
+  (<>) = liftA2 (<>)
+  {-# INLINE (<>) #-}
+
+instance Monoid a => Monoid (Yp s a) where
+  mempty  = pure mempty
+  {-# INLINE mempty #-}
+  mappend = (<>)
+  {-# INLINE mappend #-}
+
+instance Monad (Yp s) where
+  v >>= k = YP $ \b !e st l s ->
+    runParser v b e st l (\e_ b_ a -> runParser (k a) b_ e_ st l s)
+  {-# INLINE (>>=) #-}
+  (>>) = (*>)
+  {-# INLINE (>>) #-}
+  return = pure
+  {-# INLINE return #-}
+
+commit :: Env -> Env
+commit e = e { committing = True }
+{-# INLINE commit #-}
+
+-- | Versions of 'Monad.fail' that use bytestrings instead.
 --
 -- It fails with exception code 'GenericException.'
 --
@@ -255,28 +197,28 @@ instance Default a => Default (Yp a) where
 --   (b)
 --   (c) Avoid `throwError`
 --
-fault :: ExceptionCode -> ByteString -> Yp a
-fault code msg = YP $ \_ e l _ -> l e msg code
+fault :: ExceptionCode -> ByteString -> Yp s a
+fault code msg = YP $ \_ e st l _ -> l e msg code st
 {-# INLINE fault #-}
 
-fault_ :: ByteString -> Yp a
-fault_ msg = YP $ \_ e l _ -> l e msg GenericException
+--commitFault :: ExceptionCode -> ByteString -> Yp s a
+--commitFault code msg = YP $ \_ e l st _ -> l (commit e) msg code st
+--{-# INLINABLE commitFault #-}
+
+fault_ :: ExceptionCode -> ByteString -> Yp s a
+fault_ code msg = YP $ \_ e st l _ -> l (commit e) msg code st
 {-# INLINE fault_ #-}
 
-failure :: ExceptionCode -> ByteString -> Failure r
-failure code msg e _ _ = Fail e msg code
-{-# INLINE failure #-}
-
-instance MonadError ExceptionCode Yp where
+instance MonadError ExceptionCode (Yp s) where
   throwError ex = fault ex "Error thrown (MonadError)"
-  catchError p f = YP $ \b e l s ->
-    let res = runParser p b e l s
+  catchError p f = YP $ \b e st l s ->
+    let res = runParser p b e st l s
     in case res of
-         (Fail ne _ ex) -> runParser (f ex) b ne l s
-         _              -> res
+         (Fail ne ex ns nc) -> runParser (f nc) b ne ns l s
+         _                  -> res
 
-instance Alternative Yp where
-  empty = fault_ "empty (Alternative)"
+instance Alternative (Yp s) where
+  empty = fault InternalError "empty (Alternative)"
   {-# INLINE empty #-}
   (<|>) = mplus
   {-# INLINE (<|>) #-}
@@ -289,66 +231,38 @@ instance Alternative Yp where
           some_v = liftA2 (:) v many_v
   {-# INLINE some #-}
 
-instance Monad Yp where
-  v >>= k = YP $ \b !e l s ->
-    runParser v b e l (\t_ e_ a -> runParser (k a) t_ e_ l s)
-  {-# INLINE (>>=) #-}
-  (>>) = (*>)
-  {-# INLINE (>>) #-}
-  return = pure
-  {-# INLINE return #-}
-  -- Avoid, unless value is known at compile time.
-  -- Use `throwError` instead for anything runtime.
-  --fail = fault_ . s2bs
-  --{-# INLINE fail #-}
-
-instance MonadPlus Yp where
-  mzero = fault_ "mzero"
+instance MonadPlus (Yp s) where
+  mzero = fault InternalError "mzero"
   {-# INLINE mzero #-}
-  mplus f g = YP $ \b e l s ->
-    runParser f b e (\_ _ _ -> runParser g b e l s) s
+  mplus f g = ifM (committing <$> getEnv) f (YP $ \b e st l s ->
+    runParser f b e st (\_ _ _ _ -> runParser g b e st l s) s)
   {-# INLINE mplus #-}
 
-instance Semigroup a => Semigroup (Yp a) where
-  (<>) = liftA2 (<>)
-  {-# INLINE (<>) #-}
-
-instance Monoid a => Monoid (Yp a) where
-  mempty  = pure mempty
-  {-# INLINE mempty #-}
-  mappend = (<>)
-  {-# INLINE mappend #-}
-
-instance MonadState Env Yp where
-  get = YP $ \b !e _ s -> s b e e
+instance MonadState s (Yp s) where
+  get = YP $ \b !e st _ s -> s e b st
   {-# INLINE get #-}
-  put e = YP $ \b _ l s -> runParser unit b e l s
+  put st = YP $ \b e _ l s -> runParser unit b e st l s
   {-# INLINE put #-}
 
-instance MonadReader Env Yp where
-  ask = get
+instance MonadReader s (Yp s) where
+  ask = YP $ \b !e st _ s -> s e b st
   {-# INLINE ask #-}
-  local fun par = YP $ \b !e l s -> runParser par b (fun e) l s
+  local fun par = YP $ \b !e st l s -> runParser par b e (fun st) l s
   {-# INLINE local #-}
-  reader fun = YP $ \b !e _ s -> s b e (fun e)
+  reader fun = YP $ \b !e st _ s -> s e b (fun st)
   {-# INLINE reader #-}
 
-#define GO(n,T,s) n :: Yp (T); n = reader s; {-# INLINE n #-}
-GO(getPos, Int, position)
-GO(getParserLabels, [ByteString], parserLabels)
-GO(getFilepath, FilePath, filepath)
-GO(getFiletype, ByteString, filetype)
-GO(getImports, Map ByteString ByteString, imports)
-GO(getExternalVars, Map ByteString Value, externalVars)
-GO(getLocalStrings, Map ByteString Pattern, localStrings)
-GO(getInscopeRules, Map ByteString RuleType, inscopeRules)
-#undef GO
+-- | Name the parser, in the event failure occurs. Used before the parser.
+annotate :: ByteString -> Yp s a -> Yp s a
+annotate m par = YP $ \b e st l s -> let tmp = parserLabels e
+  in runParser par b e st (\e_ s_ c_ st_ ->
+                              l (e_ {parserLabels = m:tmp}) s_ c_ st_) s
+{-# INLINE annotate #-}
 
--- | Name the parser, in the event failure occurs.
+-- | Infix version of @annotate@ but used after the parser.
 infixr 1 <?>
-(<?>) :: Yp a -> ByteString -> Yp a
-par <?> m = YP $ \b e l s -> let tmp = parserLabels e
-  in runParser par b e (\e_ s_ c_ -> l (e_ {parserLabels = m:tmp}) s_ c_) s
+(<?>) :: Yp s a -> ByteString -> Yp s a
+(<?>) = flip annotate
 {-# INLINE (<?>) #-}
 
 posMap :: (Int -> Int) -> Env -> Env
@@ -357,83 +271,55 @@ posMap f e = let pos = position e in e { position = f pos }
 
 -- | Checks if there are atleast `n` bytes of buffer string left.
 -- Parse always succeeds
-atleastBytesLeft :: Int -> Yp Bool
-atleastBytesLeft i = YP $ \b e _ s ->
+atleastBytesLeft :: Int -> Yp s Bool
+atleastBytesLeft i = YP $ \b e _ _ s ->
   if position e + i <= bufferLength b
-    then s b e True
-    else s b e False
+    then s e b True
+    else s e b False
 {-# INLINE atleastBytesLeft #-}
 
 -- | Advance the position pointer.
 -- Returns true if successful, false if not.
 --
 -- Parser always succeeds.
-advance :: Int -> Yp Bool
+advance :: Int -> Yp s Bool
 advance n = ifM (atleastBytesLeft n)
- (YP $ \b e _ s -> s b (posMap (+n) e) True)
- (YP $ \b e _ s -> s b e False)
+ (YP $ \b e _ _ s -> s (posMap (+n) e) b True)
+ (YP $ \b e _ _ s -> s e b False)
 {-# INLINE advance #-}
+
+getEnv :: Yp s Env
+getEnv = YP $ \b e _ _ s -> s e b e
+{-# INLINE getEnv #-}
+
+getPos :: Yp s Int
+getPos = YP $ \b e _ _ s -> s e b $ position e
+{-# INLINE getPos #-}
 
 -- -----------------------------------------------------------------------------
 -- Running parsers
 
 -- | Run a parser.
-parse :: Yp a        -- ^ Parser to run
+parse :: Yp s a      -- ^ Parser to run
       -> Env         -- ^ Envrionment conditions to parse with
+      -> s
       -> ByteString  -- ^ ByteString to parse
-      -> Result a
-parse p env bs =
+      -> Result s a
+parse p env st bs =
   runParser p
             (toBuffer bs)
             (env { position = 0 })
-            (\e s c -> Fail e s c)
-            (\b e t -> Done (bufferUnsafeDrop (position e) b) t)
+            st
+            (\e b c ns -> Fail e b ns c)
+            (\e b t -> Done (bufferUnsafeDrop (position e) b) t)
 {-# INLINE parse #-}
 
--- | Parse with default environment settings.
-parse_ :: Yp a -> ByteString -> Result a
-parse_ p = parse p def
+-- | Parse without state settings.
+parse_ :: Yp () a -> ByteString -> Result () a
+parse_ p = parse p def ()
 {-# INLINE parse_ #-}
 
 
 
+pnr = YP $ \b e _ _ s -> s (commit e) b ()
 
-{- TODO: Need to verify compiler core-dumps basically this instance before
-         deleting.
-instance (NFData r) => NFData (Result r) where
-  rnf (Fail m n e) = rnf m `seq` rnf n `seq` rnf e
-  rnf (Partial _)      = ()
-  rnf (Done t r)       = rnf t `seq` rnf r
-  {-# INLINE rnf #-}
-
-
-
-
-
-
-instance Functor Result where
-  fmap _ (Fail e b c) = Fail e b c
-  fmap f (Partial p)  = Partial $ \x -> fmap f $ p x
-  fmap f (Done b r)   = Done b $ f r
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-newtype ModName = ModName String        -- Module name
- deriving (Show,Eq,Ord,Data,Generic)
-
-newtype PkgName = PkgName String        -- package name
- deriving (Show,Eq,Ord,Data,Generic)
--}
