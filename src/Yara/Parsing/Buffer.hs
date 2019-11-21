@@ -4,7 +4,7 @@
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 -- |
 -- Module      :  Yara.Parsing.Buffer
--- Copyright   :  David Heras 2018-2019
+-- Copyright   :  David Heras 2019
 -- License     :  GPL-3
 --
 -- Maintainer  :  dheras@protonmail.com
@@ -30,13 +30,6 @@ module Yara.Parsing.Buffer (
 
 import Yara.Prelude
 
-import Data.ByteString.Internal
-import Foreign.ForeignPtr
-import Foreign.Ptr
-import Foreign.Storable
-import GHC.ForeignPtr
-    -----
-
 type Pos = Int
 
 -- | The buffer of text being parsed.
@@ -48,7 +41,6 @@ data Buffer = Buf {
   , _gen :: !Int                -- ^
   }
 
--- | To annotate
 bufferSubstring :: Int        -- ^ Offset marker
                 -> Int        -- ^ Length of substring
                 -> Buffer     -- ^ Buffer to use
@@ -59,7 +51,6 @@ bufferSubstring s l (Buf fp off len _ _) =
   PS fp (off+s) l
 {-# INLINE bufferSubstring #-}
 
--- | Convert a bytestring to a buffer
 toBuffer :: ByteString -> Buffer
 toBuffer (PS fp off len) = Buf fp off len len 0
 {-# INLINE toBuffer #-}
@@ -68,18 +59,15 @@ bufferLength :: Buffer -> Int
 bufferLength (Buf _ _ len _ _) = len
 {-# INLINE bufferLength #-}
 
--- | To annotate
 bufferLengthAtLeast :: Pos -> Int -> Buffer -> Bool
 bufferLengthAtLeast p n bs = bufferLength bs >= p + n
 {-# INLINE bufferLengthAtLeast #-}
 
--- | To annotate
 bufferPappend :: Buffer -> ByteString -> Buffer
 bufferPappend (Buf _ _ _ 0 _) bs   = toBuffer bs
 bufferPappend buf (PS fp off len)  = bufferAppend buf fp off len
 {-# INLINE bufferPappend #-}
 
--- | To annotate
 bufferAppend :: Buffer -> ForeignPtr a -> Int -> Int -> Buffer
 bufferAppend (Buf fp0 off0 len0 cap0 gen0) !fp1 !off1 !len1 =
   accursedUnutterablePerformIO . withForeignPtr fp0 $ \ptr0 ->
@@ -109,13 +97,11 @@ bufferAppend (Buf fp0 off0 len0 cap0 gen0) !fp1 !off1 !len1 =
                 return (Buf fp genSize newlen newcap newgen)
 {-# INLINE bufferAppend #-}
 
--- | To annotate
 bufferUnsafeIndex :: Buffer -> Int -> Byte
 bufferUnsafeIndex (Buf fp off len _ _) i = assert (i >= 0 && i < len)
   . accursedUnutterablePerformIO . withForeignPtr fp $ flip peekByteOff (off+i)
 {-# INLINE bufferUnsafeIndex #-}
 
--- | To annotate
 bufferUnsafeDrop :: Int -> Buffer -> ByteString
 bufferUnsafeDrop s (Buf fp off len _ _) =
   assert (s >= 0 && s <= len) $ PS fp (off+s) (len-s)
