@@ -1,5 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE NoImplicitPrelude #-}
 -- |
 -- Module      :  Yara.Parsing.Preprocess
 -- Copyright   :  David Heras 2019

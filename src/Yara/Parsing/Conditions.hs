@@ -1,10 +1,4 @@
-{-# LANGUAGE ApplicativeDo #-}
-{-# LANGUAGE BlockArguments #-}
-{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE NegativeLiterals #-}
-{-# LANGUAGE NoImplicitPrelude #-}
-{-# LANGUAGE NumericUnderscores #-}
-{-# LANGUAGE OverloadedStrings #-}
 -- |
 -- Module      :  Yara.Parsing.Conditions
 -- Copyright   :  David Heras 2019

@@ -1,13 +1,3 @@
-{-# LANGUAGE ApplicativeDo #-}
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE BlockArguments #-}
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE NoImplicitPrelude #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE Rank2Types #-}
-{-# LANGUAGE UnboxedTuples #-}
 #ifdef hlint
 {-# ANN module "HLint: ignore Eta reduce" #-}
 #endif

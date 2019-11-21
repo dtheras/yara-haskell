@@ -1,12 +1,3 @@
-{-# LANGUAGE ApplicativeDo #-}
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE NoImplicitPrelude #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TupleSections #-}
-{-# LANGUAGE ViewPatterns #-}
-{-# OPTIONS_GHC -funbox-strict-fields #-}
 {-# OPTIONS_GHC -Wno-orphans #-} -- quiets ghc over Semigroup instance for Bool
 -- |
 -- Module      :  Yara.Prelude.Internal
@@ -70,7 +61,6 @@ import GHC.Generics               as Export (Generic)
 import GHC.Num                    as Export
 import GHC.Real                   as Export hiding (odd)
 import GHC.Show                   as Export
-
 
 import qualified Data.ByteString as B hiding (intercalate)
 import qualified Data.ByteString.Short as S

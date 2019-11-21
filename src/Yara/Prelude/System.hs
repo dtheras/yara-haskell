@@ -1,5 +1,3 @@
-{-# LANGUAGE NoImplicitPrelude #-}
-{-# LANGUAGE PatternGuards #-}
 -- |
 -- Module      :  Yara.Prelude.System
 -- Copyright   :  David Heras 2019

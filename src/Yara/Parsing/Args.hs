@@ -1,9 +1,6 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE NoImplicitPrelude #-}
-{-# LANGUAGE OverloadedStrings #-}
 -- |
 -- Module      :  Yara.Parsing.Args
--- Copyright   :  David Heras 2018-2019
+-- Copyright   :  David Heras 2019
 -- License     :  GPL-3
 --
 -- Maintainer  :  dheras@protonmail.com
@@ -22,34 +19,26 @@ module Yara.Parsing.Args (
 import Yara.Prelude
 import Yara.Parsing.Combinators
 import Yara.Parsing.Parser
-import Yara.Parsing.Rules
-import Yara.Parsing.Types
+import Yara.Parsing.AST
 
-import Data.ByteString hiding (takeWhile, elem, length)
-import qualified Data.ByteString as B (length)
-import Data.ByteString.Char8 (unlines, unwords)
-import qualified Data.Map.Strict as Map
-import Data.Sequence ((<|))
-import Control.Monad.State.Strict
-
-
+import qualified Data.ByteString as B
+import qualified Data.HashMap.Strict
+import GHC.Exts
 
 -- Doesn't accept non-visible characters for Windows or Posix
 -- Windows excludes:  <  >  :  "  /  \  |  ?  *
 badFilepathByte :: Byte -> Bool
 badFilepathByte w = not $ if onWindows
-  then w - 35 <= 6 || w - 43 <= 3 || w - 48 <= 9 || w == 59
-                          || w == 61 || w - 64 <= 27 || w == 93
-                          || w - 95 <= 28 || w == 123 || w == 126
+  then w - 35 <= 6 || w - 43 <= 3 || w - 48 <= 9 || w == 59 || w == 61 ||
+            w - 64 <= 27 || w == 93 || w - 95 <= 28 || w == 123 || w == 126
   else w - 33 <= 58 || w - 93 <= 33
 {-# INLINE badFilepathByte #-}
-{-
-filepathQuoted :: Yp ByteString
-filepathQuoted = quotedStringWith badFilepathByte
-      | w == 42 && not b   = Just True  -- if escaped wildcard, keep going
+
+filepathQuoted :: Yp s ByteString
+filepathQuoted = textStringWith (not badFilepathByte)
 {-# INLINE filepathQuoted #-}
--}
-filepathUnquoted :: Yp ByteString
+
+filepathUnquoted :: Yp s ByteString
 filepathUnquoted = do
   fp <- scan False $ \b w -> if
       | badFilepathByte w  -> Nothing    -- if not fp char, done
@@ -59,35 +48,33 @@ filepathUnquoted = do
   -- 'scan' will exit on any non-filepath character.
   -- So, check if 'scan' exited due to that or unescaped space.
   n  <- peekByte
-  when_ (isSpace n)
-        ("Encounter bad filepath character '" +> n ++ "'")
-        (return fp)
-  <?> "filepath"
-{-# INLINE filepathUnquoted #-}
-{-
+  if isSpace n
+    then return fp
+    else "Encounter bad filepath character '" +> n ++ "'"
+--{-# INLINE filepathUnquoted #-}
+
 -- | `filepath` parses filepath passed into the command line, either style
 --  quoted style:    $ prog --flag="some/random filepath"
 --  unquoted style:  $ prog --flag=some/random\ filepath
-filepath :: Yp ByteString
+filepath :: Yp s ByteString
 filepath = filepathQuoted <|> filepathUnquoted
 {-# INLINE filepath #-}
--}
 
+data ArgState = AS {
+    maxStrPerRule   :: Int
+  , stackSize       :: Int
+  , threads         :: Int
+  , maxRules        :: Int
+  , timeout         :: Int
+  , atomTable       :: Maybe FilePath ByteString
+  , onlyIdens       :: H.HashMap ByteString ByteString
+  , externVars      :: H.HashMap ByteString ByteString
+  , tags            :: [ByteString]
+  , disableWarnings :: Bool
+  , printMetadata   :: Bool
+  }
 
-
--- Return the next command line argument.
-getArg :: Yp ByteString
-getArg = do
-  spaces
-  arg <- scan False p
-  w <- peekByte
-  when_ (w < 32) "Encountered bad command line character!" $ pure arg
-  <?> "getArg"
-  where p b w | w < 32            = Nothing
-              | w == 32 && not b  = Nothing
-              | w == 92 && not b  = Just True
-              | otherwise         = Just False
-{-# INLINE getArg #-}
+type ArgParser a = Yp ArgState a
 
 showHelp :: ByteString
 showHelp = unlines [
@@ -110,23 +97,315 @@ showArgs = Map.foldlWithKey go "" args
                   (Arg2 h l m _) -> ("--" ++ d ++ "=" ++ l ++ "=" ++ m, h)
 {-# INLINE showArgs #-}
 
-data ArgN = Arg0 ByteString             (Yp ())
-          | Arg1 ByteString Label       (ByteString -> Yp ())
-          | Arg2 ByteString Label Label (ByteString -> ByteString -> Yp ())
 
--- Helps reability by avoiding (visible) tuple nesting
-(=?) :: a -> b -> (a,b)
-(=?) a b = (a,b)
-infixl 1 =?
+
+
+
+
+data Args
+  = Bin {-# UNPACK #-} !Args !Args !Int# -- Just subtrees and size
+        !Byte
+        -- ^ Simple flag version
+        !ShortByteString
+        -- ^ Long flag version
+        !ShortByteString
+        -- ^ Description
+        !(# () | (# ShortByteString) | (# ShortByteString, ShortByteString #) #)
+        -- ^ The variable arguments
+        !(ArgParser ())
+        -- ^ Action to take
+  | Tip
+
+-- | Levity-handling list, since the built in list type can
+-- only handle boxed types.
+data List (a :: TYPE (proxy :: RuntimeRep)) where
+  C :: a -> List a -> List a
+  N :: List a
+
+instance Foldable List where
+  foldMap f N       = mempty
+  foldMap f (C a r) = mappend (f a) (foldMap r)
+
+infixr 5 =?
+(=?) :: a -> List a -> List a
+(=?) = C
 {-# INLINE (=?) #-}
+
+argsList :: List (# Byte
+                  , ShortByteString
+                  , ShortByteString
+                  , (# ()
+                     | ShortByteString
+                     | (# ShortByteString, ShortByteString #)
+                       #)
+                  , ArgParser ()
+                  #)
+argsList =
+     (# 65
+      , "atom-quality-table"
+      , "path to a file with the atom quality table"
+      , (# | "FILE" | #)
+      , handleAtomTable
+      #)
+  =? (#  67
+      , "compiled-rules"
+      , "load compiled rules"
+      , (# (# #) | | #)
+      , modify $ \e -> e { compiledRules = True }
+      #)
+  =? (# 99
+      , "count"
+      , "print only number of matches"
+      , (# (# #) | | #)
+      , modify $ \e -> e { printCount = True }
+      #)
+  =? (# 100
+      , "define"
+      , "define external variable"
+      , (# | | (# "VAR", "VALUE" #) #)
+      , handleExternalVar
+      #)
+  =? (#  87
+      , "fail-on-warnings"
+      , "fail on warnings"
+      , (# (# #) | | #)
+      , modify $ \e -> e { failOnWarnings = True }
+      #)
+  =? (# 102
+      , "fast-scan"
+      , "fast matching mode"
+      , (# (# #) | | #)
+      , modify $ \e -> e { fastScan = True }
+      #)
+  =? (# 104
+      , "help"
+      , "show this help and exit"
+      , (# (# #) | | #)
+      , modify $ \e -> e { printHelp = True }
+      #)
+  =? (# 105
+      , "identifier"
+      , "print only rules named IDENTIFIER"
+      , (# | "IDENTIFIER" | #)
+      , handleIdentifier
+      #)
+  =? (# 108
+      , "max-rules"
+      , "abort scanning after matching a NUMBER of rules"
+      , (# | "NUMBER" | #)
+      , handleMaxRules
+      #)
+  =? (#  77
+      , "max-strings-per-rule"
+      , "set maximum number of strings per rule (default=10000)"
+      , (# | "NUMBER" | #)
+      , handleMaxStrings
+      #)
+  =? (# 120
+      , "module-data"
+      , "pass FILE's content as extra data to MODULE"
+      , (# | | (# "MODULE", "FILE" #) #)
+      , handleModuleData
+      #)
+  =? (# 110
+      , "negate"
+      , "print only not satisfied rules (negate)"
+      , (# (# #) | | #)
+      , modify $ \e -> e { oppositeDay = True }
+      #)
+  =? (# 119
+      , "no-warnings"
+      , "disable warnings"
+      , (# (# #) | | #)
+      , modify $ \e -> e { disableWarnings = True }
+      #)
+  =? (# 109
+      , "print-meta"
+      , "print metadata"
+      , (# (# #) | | #)
+      , modify $ \e -> e { printMetadata = True }
+      #)
+  =? (# 68
+      , "print-module-data"
+      , "print module data"
+      , (# (# #) | | #)
+      , modify $ \e -> e { printModule = True }
+      #)
+  =? (# 101
+      , "print-namespace"
+      , "print rules' namespace"
+      , (# (# #) | | #)
+      , modify $ \e -> e { printNamespace = True }
+      #)
+  =? (# 83
+      , "print-stats"
+      , "print rules' statistics"
+      , (# (# #) | | #)
+      , modify $ \e -> e { printStats = True }
+      #)
+  =? (# 115
+      , "print-strings"
+      , "print matching strings"
+      , (# (# #) | | #)
+      , modify $ \e -> e { printStrings = True }
+      #)
+  =? (# 76
+      , "print-string-length"
+      , "print length of matched strings"
+      , (# (# #) | | #)
+      , modify $ \e -> e { printStrLength = True }
+      #)
+  =? (# 103
+      , "print-tags"
+      ,  "print tags"
+      , (# (# #) | | #)
+      , modify $ \e -> e { printTags = True }
+      #)
+  =? (# 114
+      , "recursive"
+      , "recursively search directories"
+      , (# (# #) | | #)
+      , modify $ \e -> e { recursiveSearch = True }
+      #)
+  =? (# 107
+      , "stack-size"
+      , "set maximum stack size (default=16384)"
+      , (# | "SLOTS" | #)
+      , handleStackSize
+      #)
+  =? (# 116
+      , "tag"
+      , "print only rules tagged as TAG"
+      , (# | "TAG" | #)
+      , handleTag
+      #)
+  =? (# 112
+      , "threads"
+      , "use the specified NUMBER of threads to scan a directory"
+      , (# | "NUMBER" | #)
+      , handleThreads
+      #)
+  =? (#  97
+      , "timeout"
+      , "abort scanning after the given number of SECONDS"
+      , (# | "SECONDS" | #)
+      , handleTimeout
+      #)
+  =? (# 118
+      , "version"
+      , "show version information"
+      , (# (# #) | | #)
+      , modify $ \e -> e { printVersion = True }
+      #)
+  =? N
+  where
+    handleTimeout = undefined
+    handleStackSize = undefined
+    handleMaxRules = undefined
+    handleMaxStrings = undefined
+    handleModuleData = undefined
+    handleThreads = undefined
+    handleExternVars = undefined
+    handleTimeout = undefined
+    handleAtomTable = undefined
+    handleIdentifier = undefined
+    handleTag = do
+      u <- eq *> _identifier
+      if checkIfIdentifier u
+       then modify $ \s -> let t = u : (tags s) in e { tags = t }
+       else undefined --badIdenChars
+
+    handleExternalVar = undefined
+
+    badIdenChars :: ByteString
+    badIdenChars = "yara: indentifier contains exlcuded chars"
+
+doubleArg :: ArgParser ()
+doubleArg = do
+  string "--"
+  bs <- scan () $ \_ w -> if w == 45 || isAlpha w then Just () else Nothing
+  maybe (fault_ UnrecognizedFlag bs) (\b -> pnr *> b) (queryDoubleFlag bs)
+
+singleArg :: ArgParser ()
+singleArg = string "-" *> ifM
+  (isSpace <$> peekByte)
+  (fault_ MissingArg "Missing arg")
+  (flip oddSepBy unit $ do
+     b <- anyByte
+     maybe (fault_ UnrecognizedFlag $ sig b) id (pnr *> querySingleFlag b)
+     )
+
+
+showArgs :: ByteString
+showArgs = foldMap argLine argsLList
+  where
+    argLine (#  b, bs, des, f, _ #) =
+      concat ["  -", sig b, "  --", bs, "\t", des, format f, "\n"]
+    format l = case l of
+      (# ()           | | #) -> " "
+      (#   | b          | #) -> "=" ++ b
+      (# | | (# b1, b2 #) #) -> "=" ++ b1 ++ "=" ++ b2
+
+fromList :: List Arg -> Args
+fromList N                              = Tip
+fromList (C (# sf, lf, ds, r, act #) N) = Bin 1 sf lf ds r act Tip Tip
+fromList (C (# sf, lf, ds, r, act #) r) =
+  | not_ordered kx0 xs0 = fromList' (Bin 1 kx0 x0 Tip Tip) xs0
+  | otherwise = go (1::Int) (Bin 1 kx0 x0 Tip Tip) xs0
+  where
+    not_ordered :: _
+    not_ordered _ N             = False
+    not_ordered i (C (# sf, lf, ds, r, act #) _) = kx >= ky
+    {-# INLINE not_ordered #-}
+
+    fromList' t0 xs = Foldable.foldl' ins t0 xs
+      where ins t (k,x) = insert k x t
+
+    go !_ t [] = t
+    go _ t [(kx, x)] = insertMax kx x t
+    go s l xs@((kx, x) : xss) | not_ordered kx xss = fromList' l xs
+                              | otherwise = case create s xss of
+                                  (r, ys, []) -> go (s `shiftL` 1) (link kx x l r) ys
+                                  (r, _,  ys) -> fromList' (link kx x l r) ys
+
+    -- The create is returning a triple (tree, xs, ys). Both xs and ys
+    -- represent not yet processed elements and only one of them can be nonempty.
+    -- If ys is nonempty, the keys in ys are not ordered with respect to tree
+    -- and must be inserted using fromList'. Otherwise the keys have been
+    -- ordered so far.
+    create !_ [] = (Tip, [], [])
+    create s xs@(xp : xss)
+      | s == 1 = case xp of (kx, x) | not_ordered kx xss -> (Bin 1 kx x Tip Tip, [], xss)
+                                    | otherwise -> (Bin 1 kx x Tip Tip, xss, [])
+      | otherwise = case create (s `shiftR` 1) xs of
+                      res@(_, [], _) -> res
+                      (l, [(ky, y)], zs) -> (insertMax ky y l, [], zs)
+                      (l, ys@((ky, y):yss), _) | not_ordered ky yss -> (l, [], ys)
+                                               | otherwise -> case create (s `shiftR` 1) yss of
+                                                   (r, zs, ws) -> (link ky y l r, zs, ws)
+#if __GLASGOW_HASKELL__
+{-# INLINABLE fromList #-}
+#endif
+
+
+
+
+querySigFlag :: Byte -> Maybe (ArgParser ())
+querySigFlag = undefined
+
+queryDoubleFlag :: ByteString -> Maybe (ArgParser ())
+queryDoubleFlag = undefined
+
+
+
+
+
+{-
+
 
 args :: Map.Map (Byte, ByteString) ArgN
 args = Map.fromList [
-    65  =? "atom-quality-table"   =? Arg1 "path to a file with the atom quality table" "FILE" handleAtomTable
-  , 67  =? "compiled-rules"       =? Arg0 "load compiled rules" (modify $ \e -> e { compiledRules = True })
-  , 99  =? "count"                =? Arg0 "print only number of matches" (modify $ \e -> e { printNumMatches = True })
-  , 100 =? "define"               =? Arg2 "define external variable" "VAR" "VALUE" handleExternalVar
-  , 87  =? "fail-on-warnings"     =? Arg0 "fail on warnings" (modify $ \e -> e { failOnWarnings = True })
+ 
   , 102 =? "fast-scan"            =? Arg0 "fast matching mode" (modify $ \e -> e { fastScan = True })
   , 104 =? "help"                 =? Arg0 "show this help and exit" (modify $ \e -> e { printHelp = True })
   , 105 =? "identifier"           =? Arg1 "print only rules named IDENTIFIER" "IDENTIFIER" handleIdentifier
@@ -183,6 +462,8 @@ args = Map.fromList [
     -- Error Messages
     badIdenChars :: ByteString
     badIdenChars = "yara: indentifier contains exlcuded chars"
+
+
 
 unknownFlag :: ByteString -> Yp a
 unknownFlag bs = fault $ "unknown option '" ++ bs ++ "'"
@@ -244,20 +525,21 @@ parseArgs :: [ByteString] -> Result Env
 parseArgs bs = parse_ parseArgs_ $ unwords bs
 
 
+-}
+
 
 
 
 {-
+
+
+
+
 data OPT =
     OPT_STRING_MULTI Byte ByteString [ByteString] ([ByteString] -> Parser ())
   | OPT_STRING       Byte ByteString  ByteString  ( ByteString  -> Parser ())
   | OPT_INTEGER      Byte ByteString  ByteString  ( ByteString  -> Parser ())
   | OPT_BOOL         Byte ByteString                              (Parser ())
--}
-
-
-
-{-
 
 -- Parse an unquoted-style filepath passed into the command line
 -- No size limit is imposed.
@@ -290,12 +572,6 @@ filepath = go ""
     badFPByte w = fault $ "Unrecognized filepath character '" +> w "'"
 {-# INLINE filepath #-}
 
--}
-
-
-
-
-
 --    span' :: ByteString -> (ByteString, ByteString)
 --    span' bs = mapSnd (drop 1) $ span (/= bs)
 --               where mapSnd f (x,y) = (x, f y)
@@ -307,7 +583,6 @@ filepath = go ""
 
 -- need a filepath parser.
 
-{-
 -- Few error messages needed below
 
 -- Alas, Haskell doesn't support disjunctive patterns.
@@ -325,7 +600,6 @@ handleArgs (a:as) env conf
   | otherwise        -> undefined
   --let u = a <| rules env in handleArgs (env { onlyTags = u }) as
   where
-
 
     uncons1 = List.uncons
     uncons2 cs = go =<< List.uncons cs

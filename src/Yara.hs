@@ -1,33 +1,34 @@
-
+-- |
+-- Module      :  Yara
+-- Copyright   :  David Heras 2019
+-- License     :  GPL-3
+--
+-- Maintainer  :  dheras@protonmail.com
+-- Stability   :  experimental
+-- Portability :  unknown
+--
+-- Entry point to Yara-source as module. 
+--
 module Yara (
-    module Yara
-  , module Yara.Prelude
-  , module Yara.Parsing.AST
-  , module Yara.Parsing.Buffer
-  , module Yara.Parsing.Combinators
-  , module Yara.Parsing.Parser
-  , module Yara.Parsing.Preprocess
---  , module Yara.Parsing.Strings
+    module Export
   ) where
 
-import Yara.Prelude
---import Yara.Parsing.Args
-import Yara.Parsing.AST
-import Yara.Parsing.Buffer
-import Yara.Parsing.Combinators
---import Yara.Parsing.Conditions
-import Yara.Parsing.Elf
---import Yara.Parsing.Glob
---import Yara.Parsing.Hash
-import Yara.Parsing.Magic
-import Yara.Parsing.Parser
-import Yara.Parsing.Preprocess
---import Yara.Parsing.Rules
---import Yara.Parsing.Strings
+--import Yara.Main
+import Yara.Prelude as Export
+import Yara.Parsing.AST as Export
+import Yara.Parsing.Buffer as Export
+import Yara.Parsing.Combinators as Export
+import Yara.Parsing.ByteStrings as Export
+import Yara.Parsing.Patterns as Export
+--import Yara.Parsing.Elf as Export
+--import Yara.Parsing.Magic as Export
+import Yara.Parsing.Parser as Export
+--import Yara.Parsing.Preprocess as Export
 
---import Yara.Parsing.AndOr
---import Yara.Prelude.System
---import Yara.Prelude.FilePath
---import Yara.Prelude.Internal
+--import Yara.Parsing.Rules as Export
+--import Yara.Parsing.Time as Export
+--import Yara.Parsing.Args as Export
 
 
+
+import Yara.Parsing.Tease as Export

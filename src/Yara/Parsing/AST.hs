@@ -1,14 +1,4 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE NoImplicitPrelude #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE OverloadedLists #-}
-{-# LANGUAGE ExplicitForAll #-}
-{-# LANGUAGE UnboxedTuples #-}
 {-# OPTIONS_GHC -fno-full-laziness #-}
-{-# OPTIONS_GHC -funbox-strict-fields #-}
 -- |
 -- Module      :  Yara.Parsing.Types
 -- Copyright   :  David Heras 2019

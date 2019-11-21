@@ -1,7 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE NoImplicitPrelude #-}
-{-# OPTIONS_GHC -funbox-strict-fields #-}
 -- |
 -- Module      :  Yara.Parsing.Buffer
 -- Copyright   :  David Heras 2019
