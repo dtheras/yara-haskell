@@ -1,12 +1,9 @@
 # yara
 
-Posix 
+Posix [yara homepage](https://virustotal.github.io/yara/) port. 
 
-The [yara homepage](https://virustotal.github.io/yara/) contains the mainstream implimentation of the yara specification (written in C) as well as the spec document itself.
+Home page contains the original implimentations as well as the specification doc. 
 
-## Coding Guide Lines
-
-The coding style should generally follow the
 
 ## Checklist
 
@@ -48,9 +45,4 @@ Checklist is a working section, in that parts are added/removed continuously whi
   - [ ] Clean up comments & add needed comments
   - [ ] Scan compressed files (ie. yextend)
 
-
-It is a hastle during development to constantly turn these on and off as needed. 
-
 ## Contributing
-
-### Language Extensions
