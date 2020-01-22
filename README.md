@@ -1,6 +1,4 @@
 # YARA
-
-<<<<<<< HEAD
 The target of the project is to build an implimention the current YARA 3.9.0 specification in Haskell.
 
 ## The Original Implimentation
@@ -8,12 +6,10 @@ The target of the project is to build an implimention the current YARA 3.9.0 spe
 The [yara homepage](https://virustotal.github.io/yara/) contains the orginial implimentation of the author of the yara specification (written in C) as well as a description of the software. One can find the specification document there as well.
 
 ## Portablity
-=======
+
 Posix [yara homepage](https://virustotal.github.io/yara/) port. 
 
 Home page contains the original implimentations as well as the specification doc. 
-
->>>>>>> a3def91c4619819f10b5beabd3963a62b63a7878
 
 Currently only testing on macOS and should be portable to POSIX systems. The Windows-specific YARA features/modules will not likely be included; the author doesn't use Windows or have regular access to a system running Windows.
 
@@ -66,7 +62,6 @@ Part II) Full Implimentation & Polish
   - [ ] Clean up comments & add needed comments
   - [ ] Scan compressed files (ie. yextend)
 
-<<<<<<< HEAD
 ## Roadmap
 
 The following list was a "learning roadmap" to teach myself the bread & butter of a professional Haskell programmer. In fact, the project was specifically selected because it would nontrivially required the use of each concept. Many are not Haskell specific (regex) but are listed because of the importance.
@@ -86,6 +81,3 @@ The following list was a "learning roadmap" to teach myself the bread & butter o
 - [ ] GHC Flag Options
 - [ ] Code Gen Optimization
 - [ ] Automated Testing
-=======
-## Contributing
->>>>>>> a3def91c4619819f10b5beabd3963a62b63a7878
