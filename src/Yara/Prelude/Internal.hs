@@ -1,20 +1,30 @@
 {-# OPTIONS_GHC -Wno-orphans #-} -- quiets ghc over Semigroup instance for Bool
 -- |
 -- Module      :  Yara.Prelude.Internal
--- Copyright   :  David Heras 2019
+-- Copyright   :  David Heras 2019-2020
 -- License     :  GPL-3
 --
 -- Maintainer  :  dheras@protonmail.com
 -- Stability   :  experimental
 -- Portability :  unknown
 --
--- Local prelude. Not to be imported directly; use "Yara.Prelude".
+-- Local prelude. Not to be imported directly since the system level functions
+-- are contained in a seperate file. Use "Yara.Prelude".
 --
 -- Prelude design targets/parameters:
---   o sensible defaults
---   o contain code reused across sections
---   o ByteString oriented
---   o yara spec constants/fixed parameters
+--   o Generic boilerplate
+--   o import "standard" modules
+--   o ByteString based
+--   o Systems functions that arn't application specific
+--
+-- There is an issue of namespace conflicts, especially since several functions
+-- are  defined for ByteStrings that cannot be overloaded from their counter
+-- parts (eg.  fold, all,...). If there is a conflict and...
+--    | only one of the two is needed, don't import the unused.
+--    | both are needed,
+--             -> if its used many times, try to rename one something intuitive.
+--             -> otherwise, import locally.
+--    | neither are used, OK.
 --
 module Yara.Prelude.Internal (
     module Yara.Prelude.Internal
@@ -86,7 +96,7 @@ type Byte = Word8
 -- | A bit neater than "RawFilePath"
 type FilePath = ByteString
 
--- | Strict, unpacked tuple. 
+-- | Strict, unpacked tuple.
 data T2 a s = T2 {-# UNPACK #-} !a  {-# UNPACK #-} !s
 
 instance (Show a, Show s) => Show (T2 a s) where
@@ -363,7 +373,7 @@ intercalate s (x:xs) = foldl (\a b -> a `mappend` s `mappend` b) x xs
 -- Misc.
 
 -- | Alias for 'length' of Foldables using the mathematical terminology
--- of 'cardinality'. Avoids namespace collision.
+-- of 'cardinality'. To avoid namespace collision.
 cardinality :: Foldable f => f a -> Int
 cardinality = F.length
 {-# INLINE cardinality #-}
@@ -376,18 +386,24 @@ liftA2 f a b = do
   pure $ f x y
 {-# INLINE liftA2 #-}
 
+-- | Does nothing, just returns () in an Applicative. Cleaner than a litany
+-- of "pure ()"
 unit :: Applicative f => f ()
 unit = pure ()
 {-# INLINE unit #-}
 
+-- | Infix for 'catchError'
 (>>?) :: MonadError e m => m a -> (e -> m a) -> m a
 (>>?) = catchError
 {-# INLINE (>>?) #-}
 
+-- | Infix for 'flip'
 ($/) :: (a -> b -> c) -> b -> a -> c
 ($/) f x y = f y x
 {-# INLINE ($/) #-}
 
+-- | 'asumMap'
+-- A function oddly missing from the standard libraries.
 asumMap :: (Alternative p, Foldable f) => (a -> p b) -> f a -> p b
 asumMap f = foldr ((<|>) . f) empty
 {-# INLINE asumMap #-}

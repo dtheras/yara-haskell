@@ -18,9 +18,33 @@ import qualified Data.HashMap.Strict as HM
 import qualified Data.HashSet as HS
 import qualified Data.Set as S
 
+class HasImports s where
+  imports :: s -> HM.HashMap ByteString ByteString
+
 {-# WARNING InternalError "'InternalError' remains in code" #-}
 data ExceptionCode
-   = UnterminatedInclude
+   = ExceptionSuccess
+   -- ^ Successfull exception, whatever that is
+   | ParseError
+   -- ^ Uncatchable exception => prevent catching of particular error.
+   -- The exception code is used for reporting errors during program used
+   -- such as a parsing error of a misformatted YARA rule or a stack overflow.
+   -- Since errors are reported with a message, it should contain a description
+   -- of issue.
+   | InternalError
+   -- ^ Error for internal issues and shouldn't be thrown under normal runtime.
+   -- Used for development/debugging only. It is intended to be removed after
+   -- completion.
+
+-- The exceptions below are "catchable". Why have any catchable ones?
+-- Assists in avoiding back tracking in certain areas. These are a work
+-- in progress.
+   deriving (Generic, NFData, Show, Eq)
+
+instance Default ExceptionCode where
+  def = ExceptionSuccess
+
+{-}   | UnterminatedInclude
    | FileDoesNotExist
    | ExpectedFilePathMissing
    | UnrecognizedPragma
@@ -48,27 +72,49 @@ data ExceptionCode
    | InvalidExternalVariableType
    | TooManyMatches
    | ExceedingMaxStringPerRule
-   --- Below have been used. Above are prospective.
    | BadUnits
-   | PatternNotInScope
-   | InternalError -- ^ Default error for internal issues.
-   | ExceptionSuccess -- ^ Successful
-   deriving (Generic, NFData, Show, Eq)
+   | PatternNotInScope  -- ^
+  {-      ExceptionSuccess
+          ->
+        FatalException
+          ->
+        InternalError
+          ->
 
-instance Default ExceptionCode where
-  def = InternalError
+        UnterminatedInclude
+          -> ["unterminated include pragma '", m, "' found in '", f, "'"]
+        FileDoesNotExist
+          -> ["included header file '", m, "' does not exist"]
+        UnrecognizedPragma
+          -> ["unrecognized pragma '", m]
+        IncorrectlyAlignedPragma
+          -> undefined
+        InternalError
+          -> ["generic exception ",m," ", int2bs $ position e ]
+        UnterminatedStringLiteral
+          -> ["unterminated string literal"]
+        UnexpectedNewline
+          -> ["unexpected newline"]
+        UnrecognizedEscapeCharacter
+          -> ["Unrecognized escape character ",m]
+        UnrecognizedKeyword
+          -> ["Unrecognized keyword: '",m,"' "]-}
+
+-}
 
 
 ------------------------------------------------------------------------
 -- Patterns
---
--- There are two types of patterns: name and anonymous.
+
+data PatternType = Str | Regex | Hex deriving (Generic, NFData, Show, Eq, Ord)
 
 data Pattern = Pattern {
-     fullPattern      :: ByteString
+     patternBody      :: ByteString
+   , patternType      :: PatternType
    , isPrivatePattern :: Bool
    } deriving (Generic, NFData, Show, Eq, Ord)
 
+-- There are two types of patterns: name and anonymous.
 data Patterns = Patterns {
     stdPatterns  :: HM.HashMap ByteString Pattern
   , anonPatterns :: S.Set Pattern
@@ -81,7 +127,6 @@ data Value = ValueInteger Int
            | ValueString ByteString
            | ValueBool Bool
            deriving (Show, Eq, Generic, NFData)
-
 
 data YaraRule = YaraRule
   { isGlobal   :: !Bool
@@ -101,6 +146,7 @@ data Include = Include { yararule :: FilePath }
 
 data PkgName = ByteString
 
+type Count = Integer
 
 
 

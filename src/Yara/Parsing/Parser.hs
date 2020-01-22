@@ -1,7 +1,7 @@
 {-# OPTIONS_HADDOCK prune #-}
 -- |
 -- Module      :  Yara.Parsing.Parser
--- Copyright   :  David Heras 2019
+-- Copyright   :  David Heras 2019-2020
 -- License     :  GPL-3
 --
 -- Maintainer  :  dheras@protonmail.comk
@@ -16,63 +16,44 @@ import Yara.Prelude
 import Yara.Parsing.Buffer
 import Yara.Parsing.AST
 
-import qualified Data.HashMap.Strict as H
-import Data.Map.Strict hiding (take)
-import Data.String () -- Only need typeclasses
+--import qualified Data.HashMap.Strict as H
+--import Data.Map.Strict hiding (take)
+import Data.String () -- Only need typeclass instances
 
 -----------------------------------------------------------------------------
---
+
+-- | @Env@ contains the basic state as well as "read-only" information
+data Env = Env {
+    filepath     :: !ByteString
+  , position     :: !Int
+  , parserLabels :: ![ByteString]
+  } deriving (Show,Generic,NFData)
+
+instance Default Env where
+  def = Env "" 0 []
 
 data Result s r = Fail Env ByteString s ExceptionCode
                 | Done ByteString r
 
 instance Eq r => Eq (Result s r) where
-  (Done b1 r1) == (Done b2 r2) = b1 == b2 && r1 == r2
-  _         == _               = False
+  (Done b1 r1) == (Done b2 r2)  = b1 == b2 && r1 == r2
+  _            == _             = False
 
 instance (Show s, Show r) => Show (Result s r) where
   show res = case res of
-    (Done m r)  ->
-      let rm = bs2s $ if length m > 20
-            then take 20 m ++ "..."
-            else m
+    (Done m r)  -> let
+      rm = bs2s $ if length m > 20
+        then take 20 m ++ "..."
+        else m
       in mconcat ["Done{ ", show r, " }: \"", rm,"\""]
-    (Fail e m s c) -> let
-      f = filepath e
-      p = position e
-      stamp = mconcat [f, "(", int2bs p, "): " ]
-      message = mconcat $ case c of
-        UnterminatedInclude
-          -> ["unterminated include pragma '", m, "' found in '", f, "'"]
-        FileDoesNotExist
-          -> ["included header file '", m, "' does not exist"]
-        UnrecognizedPragma
-          -> ["unrecognized pragma '", m]
-        IncorrectlyAlignedPragma
-          -> undefined
-        InternalError
-          -> ["generic exception ",m," ", int2bs $ position e ]
-        UnterminatedStringLiteral
-          -> ["unterminated string literal"]
-        UnexpectedNewline
-          -> ["unexpected newline"]
-        UnrecognizedEscapeCharacter
-          -> ["Unrecognized escape character ",m]
-        UnrecognizedKeyword
-          -> ["Unrecognized keyword: '",m,"' "]
-        _ -> ["catchallllll"]
-     in bs2s $ stamp ++ message
-
--- | `Env` contains the basic state as well as "read-only" information
-data Env = Env {
-    filepath     :: !ByteString
-  , position     :: !Int
-  , committing   :: !Bool
-  , parserLabels :: ![ByteString]
-  } deriving (Show,Generic,NFData)
-
-instance Default Env where
-  def = Env "" 0 False []
+    (Fail (Env fp pos l) msg _ c) -> let
+      stamp = mconcat [fp, "(", int2bs pos, "): " ]
+      labels = "(" ++ intercalate ", " l ++ ")"
+      showerr = case c of
+        ExceptionSuccess  -> "exception success. "
+        ParseError        -> "parsing error. "
+        InternalError     -> "internal error. "
+      in bs2s $ stamp ++ showerr ++ msg ++ labels
 
 -- | To annotate.
 type Failure s r = Env -> ByteString -> ExceptionCode -> s -> Result s r
@@ -167,41 +148,31 @@ instance Monad (Yp s) where
   return = pure
   {-# INLINE return #-}
 
-commit :: Env -> Env
-commit e = e { committing = True }
-{-# INLINE commit #-}
-
--- | Versions of 'Monad.fail' that use bytestrings instead.
---
--- It fails with exception code 'GenericException.'
---
--- Rule of thumb when throw exceptions:
---   (a) If it is a general parsing failure, use 'fault'
---   (b)
---   (c) Avoid `throwError`
---
+-- | Throws error with code, for this module only.
+-- Use 'parseError' and 'internalError' instead elsewhere.
 fault :: ExceptionCode -> ByteString -> Yp s a
 fault code msg = YP $ \_ e st l _ -> l e msg code st
 {-# INLINE fault #-}
 
---commitFault :: ExceptionCode -> ByteString -> Yp s a
---commitFault code msg = YP $ \_ e l st _ -> l (commit e) msg code st
---{-# INLINABLE commitFault #-}
+parseError :: ByteString -> Yp s a
+parseError = fault ParseError
+{-# INLINE parseError #-}
 
-fault_ :: ExceptionCode -> ByteString -> Yp s a
-fault_ code msg = YP $ \_ e st l _ -> l (commit e) msg code st
-{-# INLINE fault_ #-}
+internalError :: ByteString -> Yp s a
+internalError = fault InternalError
+{-# INLINE internalError #-}
 
+-- | Avoid use of 
 instance MonadError ExceptionCode (Yp s) where
-  throwError ex = fault ex "Error thrown (MonadError)"
-  catchError p f = YP $ \b e st l s ->
-    let res = runParser p b e st l s
+  throwError _ = internalError $ "Error thrown (MonadError): unknown reason"
+  catchError p f = YP $ \b e st l s -> let
+    res = runParser p b e st l s
     in case res of
-         (Fail ne ex ns nc) -> runParser (f nc) b ne ns l s
-         _                  -> res
+         (Fail ne _ ns nc) -> runParser (f nc) b ne ns l s
+         _                 -> res
 
 instance Alternative (Yp s) where
-  empty = fault InternalError "empty (Alternative)"
+  empty = internalError "empty (Alternative)"
   {-# INLINE empty #-}
   (<|>) = mplus
   {-# INLINE (<|>) #-}
@@ -215,10 +186,11 @@ instance Alternative (Yp s) where
   {-# INLINE some #-}
 
 instance MonadPlus (Yp s) where
-  mzero = fault InternalError "mzero"
+  mzero = internalError "mzero"
   {-# INLINE mzero #-}
-  mplus f g = ifM (committing <$> getEnv) f (YP $ \b e st l s ->
-    runParser f b e st (\_ _ _ _ -> runParser g b e st l s) s)
+  --mplus f g = ifM (committing <$> getEnv) f (YP $ \b e st l s ->
+  mplus f g = YP $ \b e st l s ->
+    runParser f b e st (\_ _ _ _ -> runParser g b e st l s) s
   {-# INLINE mplus #-}
 
 instance MonadState s (Yp s) where
@@ -235,19 +207,16 @@ instance MonadReader s (Yp s) where
   reader fun = YP $ \b !e st _ s -> s e b (fun st)
   {-# INLINE reader #-}
 
--- | Name the parser, in the event failure occurs. Used before the parser.
-annotate :: ByteString -> Yp s a -> Yp s a
-annotate m par = YP $ \b e st l s -> let tmp = parserLabels e
-  in runParser par b e st (\e_ s_ c_ st_ ->
-                              l (e_ {parserLabels = m:tmp}) s_ c_ st_) s
-{-# INLINE annotate #-}
-
 -- | Infix version of @annotate@ but used after the parser.
 infixr 1 <?>
 (<?>) :: Yp s a -> ByteString -> Yp s a
-(<?>) = flip annotate
+(<?>) par m = YP $ \b e st l s -> let
+  tmp = parserLabels e
+  l_ e_ s_ c_ st_ = l (e_ {parserLabels = m:tmp}) s_ c_ st_
+  in runParser par b e st l_ s
 {-# INLINE (<?>) #-}
 
+-- | Apply function to the position record
 posMap :: (Int -> Int) -> Env -> Env
 posMap f e = let pos = position e in e { position = f pos }
 {-# INLINE posMap #-}
@@ -271,6 +240,7 @@ advance n = ifM (atleastBytesLeft n)
  (YP $ \b e _ _ s -> s e b False)
 {-# INLINE advance #-}
 
+-- | Return 'Env' in the monad (since MonadState is tied to the local state)
 getEnv :: Yp s Env
 getEnv = YP $ \b e _ _ s -> s e b e
 {-# INLINE getEnv #-}
@@ -301,8 +271,3 @@ parse p env st bs =
 parse_ :: Yp () a -> ByteString -> Result () a
 parse_ p = parse p def ()
 {-# INLINE parse_ #-}
-
-
-
-pnr = YP $ \b e _ _ s -> s (commit e) b ()
-

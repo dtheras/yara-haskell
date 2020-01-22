@@ -49,18 +49,18 @@ scan_ :: (Byte -> Byte)
       -> st
       -- ^ Initial state value
       -> Yp s r
-scan_ shift !ret !rho !s0 = do
+scan_ mo !ret !rho !s0 = do
   bs@(PS fp off len) <- getBuff
   let T2 i u = accursedUnutterablePerformIO $
         withForeignPtr fp $ \ptr0 -> do
-          let done !i !s = pure $! T2 i s
+          let done !j !s = pure $! T2 j s
               start = ptr0 ~+ off
               inner ptr !s
                 | ptr < (start ~+ len) = do
                     w <- peek ptr
                     case rho s w of
                       Just s' -> do
-                        pokeByteOff ptr 0 (shift w)
+                        pokeByteOff ptr 0 (mo w)
                         inner (ptr ~+ 1) s'
                       _       -> done (ptr ~- start) s
                 | otherwise = done (ptr ~- start) s
@@ -146,6 +146,7 @@ updateState _ _ s@(TSFin _)      = s
 textStringWith :: (Byte -> Bool) -> Yp s ByteString
 textStringWith pred = do
   bs <- quote *> getNormalizedBuff
+
   let atomic :: TSTok -> Ptr Byte -> Int -> Int -> IO (Int, TSTok)
       atomic TSClosed         _ t h = pure (t,TSFin h)
       atomic s@TSBadNewLn     _ _ h = pure (h,s)
@@ -164,18 +165,23 @@ textStringWith pred = do
            atomic st ptr t (hare+1)
       {-# INLINE atomic #-}
       --
-      (b,s) = atomicModification atomic TSNorm bs
+  let (b,s) = atomicModification atomic TSNorm bs
 
   case s of
     TSFin n      -> advance n $> b
-    TSBadNewLn   -> fault UnexpectedNewline "unexpected new line found"
-    TSUnrecHex v -> fault UnrecognizedEscapeCharacter $
-                     "expecting a hexadecimal character but found '" +> v +> 39
-    TSUnrecEsc v -> fault UnrecognizedEscapeCharacter $
-                     39 <+ v <+ "' not a permitted escape character"
-    TSBadByte v  -> fault UnrecognizedEscapeCharacter $
-                     39 <+ v <+ "' failed the predicate"
-    _            -> fault InternalError "here"
+    TSBadNewLn   -> parseError "encountered unexpected new line"
+    TSUnrecHex v -> parseError $ mconcat [
+        "Unrecognized escape character: expecting a "
+      , "hexadecimal character but found '" +> v +> 39
+      ]
+    TSUnrecEsc v -> parseError $ mconcat [
+        "Bad escape character: "++sig 39++sig v
+      , "' not a permitted escape character"
+      ]
+    TSBadByte v  -> parseError $
+      "Bad escape character: "++sig 39++sig v++"' failed the predicate"
+    _            -> internalError
+      "Nirvana reached, that is to say you shouldn't be able to reach this point"
   <?> "stringLiteral"
 {-# INLINABLE textStringWith #-}
 
@@ -194,22 +200,27 @@ textString = textStringWith $ \_ -> True
 _identifier :: Yp s ByteString
 _identifier = do
   r <- scan 0 rho
-  let i = head r
+  --let i = head r
   b <- peekByte
-  if -- If the following byte is an id byte then identifier is illegal
-     | isIdByte b -> do
+
+     -- If the following byte is an id byte then identifier is illegal
+  if | isIdByte b -> do
          rest <- takeWhile isIdByte
-         fault IndentifierOverflow $ "Illegal identifier (must be <128 bytes): " ++ r ++ rest
+         parseError $ "Bad identifier: must be <=128 bytes " ++ r ++ rest
+
      -- Keywords are not acceptable
-     | isKeyword ({-toShort-} r) ->
-         fault InvalidIdentifier $ "Identifier cannot be a keyword: '" ++ r ++ "'"
+     | isKeyword r ->
+         parseError $ "Bad identifier: cannot be a keyword (" ++ r ++ ")"
+
      -- Simply an underscore or digit is not an acceptable identifier
      | length r <= 1 ->
-         fault InvalidIdentifier $ "Unacceptable identifier: " ++ r
+         parseError $ "Bad identifier: unaccepted identifier of '" ++ r++ "'"
+
      -- Otherwise, we have an acceptable identifier
      | otherwise   ->
          pure r
   <?> "_identifier"
+
   where
     rho :: Int -> Byte -> Maybe Int
     rho n b
@@ -224,13 +235,8 @@ _identifier = do
 -- | Parse an identifier that isn't "imported," ie. is not module name
 -- trailed by a '.' trailed by an identifier
 identifierNoImport :: Yp s ByteString
-identifierNoImport = do
-  l <- _identifier
-  --s <- getStrings
-  pure l
-{-}  if l `Map.member` s
-    then pure l
-    else fault $ "String not in scope: " ++ l-}
+identifierNoImport = _identifier
+  <?> "identifierNoImport"
 {-# INLINE identifierNoImport #-}
 
 -- | Parse an identifier preceeded by a '$'
@@ -239,14 +245,7 @@ label :: Yp s ByteString
 label = liftA2 seq dollar identifierNoImport
 {-# INLINE label #-}
 
-type YaraParser a = Yp YaraParserState a
-
-data YaraParserState = YPS {
-    imports :: HM.HashMap ByteString ByteString
-  , localPatterns :: Patterns
-  }
-
-getImports :: YaraParser (HM.HashMap ByteString ByteString)
+getImports :: HasImports s => Yp s (HM.HashMap ByteString ByteString)
 getImports = imports <$> get
 {-# INLINE getImports #-}
 
@@ -263,7 +262,7 @@ getImports = imports <$> get
 --
 -- We additionally imposed that identifiers cannot be a single number or
 -- just an underscore for the time being, due to parsing issues.
-identifier :: YaraParser ByteString
+identifier :: HasImports s => Yp s ByteString
 identifier = do
   i <- _identifier
   -- If the next byte is a dot, may be trying to import a module.

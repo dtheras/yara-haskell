@@ -1,6 +1,6 @@
 -- |
 -- Module      :  Yara.Parsing.Buffer
--- Copyright   :  David Heras 2019
+-- Copyright   :  David Heras 2019-2020
 -- License     :  GPL-3
 --
 -- Maintainer  :  dheras@protonmail.com
@@ -37,9 +37,9 @@ data Buffer = Buf {
   , _gen :: !Int                -- ^
   }
 
-bufferSubstring :: Int        -- ^ Offset marker
-                -> Int        -- ^ Length of substring
-                -> Buffer     -- ^ Buffer to use
+bufferSubstring :: Int         -- ^ Offset marker
+                -> Int         -- ^ Length of substring
+                -> Buffer      -- ^ Buffer to use
                 -> ByteString
 bufferSubstring s l (Buf fp off len _ _) =
   assert (s >= 0 && s <= len) .

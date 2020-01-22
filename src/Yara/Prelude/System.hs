@@ -1,6 +1,6 @@
 -- |
 -- Module      :  Yara.Prelude.System
--- Copyright   :  David Heras 2019
+-- Copyright   :  David Heras 2019-2020
 -- License     :  GPL-3
 --
 -- Maintainer  :  dheras@protonmail.com
@@ -15,7 +15,7 @@ module Yara.Prelude.System (
   ) where
 
 import System.Posix.Types as Export
-
+import System.FilePath.ByteString
 import Yara.Prelude.Internal
 
 import Data.ByteString hiding (elem)

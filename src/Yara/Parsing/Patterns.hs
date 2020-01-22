@@ -15,6 +15,7 @@
 --
 module Yara.Parsing.Patterns (
     parsePatterns -- :: Yp s Patterns
+  , hasPattern
   ) where
 
 import Yara.Prelude
@@ -81,19 +82,22 @@ patternModifiers = do
       ] <?> "keyword"
 
 -- | Converts a pattern with its modifications to regex
-toRegex :: ByteString -> Modifications -> Pattern
-toRegex b Modifications{..} = Pattern (nocase_ $ fullword_ $ wide_ b) private_
+toRegex :: ByteString -> PatternType -> Modifications -> Pattern
+toRegex b t Modifications{..} =
+  Pattern (nocase_ $ fullword_ $ wide_ b) t private_
 {-# INLINE toRegex #-}
 -- TODO: impliment xor
 -- Per the spec, the xor-condition applied last
 
 -- | Parse a text string pattern
 textPattern :: Yp s Pattern
-textPattern = liftA2 toRegex textString patternModifiers <?> "text pattern"
+textPattern =
+  liftA3 toRegex textString (pure Str) patternModifiers <?> "text pattern"
 
 -- | Parse a regex string pattern
 regexPattern :: Yp s Pattern
-regexPattern = liftA2 toRegex regexPat patternModifiers <?> "regex pattern"
+regexPattern =
+  liftA3 toRegex regexPat (pure Regex) patternModifiers <?> "regex pattern"
   where -- 1) Open regex with a forward slash '/'
         -- 2) Scan source until unescaped forward slash '/' is encountered
     p s w | s && w /= 47  = Nothing
@@ -162,15 +166,15 @@ hexPair = do
 
 hexRange :: Yp s ByteString
 hexRange = do
-  (T2 l u) <- range $ takeWhile isDigit -- No need to "read" in values
+  T2 l u <- range $ takeWhile isDigit -- No need to "read" in values
   let ret bs = pure $ "[\\d\\D]" ++ bs
   if | isEmpty u
         , isEmpty l -> ret $ "*"
      | isEmpty u    -> ret $ "{" ++ l ++ ",}"
      | isEmpty l    -> ret $ "{0," ++ u ++ "}"
      | u == l       -> ret $ "{" ++ l ++ "}"
-     | lessthan u l -> fault BadRangeBounds
-         "found bad hex-pattern range, must be lower <= upper"
+     | lessthan u l -> parseError
+           "bad hex-pattern bounds: must satisfy lower <= upper"
      | otherwise    -> ret $ "{" ++ l ++ "," ++ u ++ "}"
   <?> "hexRange"
 {-# INLINABLE hexRange #-}
@@ -179,8 +183,8 @@ hexJump :: Yp s ByteString
 hexJump = between sqBra sqKet $ do
   j <- takeWhile isDigit
   if isEmpty j
-    then fault BadRangeBounds
-           "found bad hex-pattern range, single must be defined"
+    then parseError
+           "found bad hex-pattern range: expecting a non-negative integer"
     else pure $ "[\\d\\D]{" ++ j ++ "}"
   <?> "hexJump"
 {-# INLINABLE hexJump #-}
@@ -189,7 +193,7 @@ hexPattern :: Yp s Pattern
 hexPattern = do
   h <- between oCurly cCurly $ grouped spaces (hexTokens <|> hexSubPatGrp)
   s <- seek $ optional (sepBy1 (void "private") space1)
-  pure $ Pattern (fold h) (isJust s)
+  pure $ Pattern (fold h) Hex (isJust s)
   <?> "hexPattern"
   where
     hexTokens = fold <$> sepBy1 (hexPair <|> hexJump <|> hexRange) spaces

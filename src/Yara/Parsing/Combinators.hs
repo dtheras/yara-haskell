@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -Wno-missing-signatures #-}
 #ifdef hlint
 {-# ANN module "HLint: ignore Eta reduce" #-}
 #endif
@@ -19,12 +20,9 @@ import Yara.Parsing.AST
 import Yara.Parsing.Buffer
 import Yara.Parsing.Parser
 
-import Data.Bits
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as C8
-import Data.Int
-import qualified Data.HashSet as HS
-import Data.Scientific
+--import Data.Scientific
 import Data.String
 
 -- -----------------------------------------------------------------------------
@@ -54,7 +52,7 @@ peekByte = YP (\b e st l s ->
   let pos = position e in
   if bufferLengthAtLeast pos 1 b
     then s e b (bufferUnsafeIndex b pos)
-    else l e "peekByte expected 1 byte" RemainingBufferToShort st
+    else l e "Buffer to short: 'peekByte' expected 1 byte" ParseError st
   ) <?> "peekByte"
 {-# INLINE peekByte #-}
 
@@ -63,7 +61,8 @@ satisfy p = do
   h <- peekByte
   if p h
     then advance 1 $> h
-    else fault InternalError "satisfy"
+    else parseError "Failed 'satisfy'"
+  <?> "satisfy"
 {-# INLINE satisfy #-}
 
 -- | Match a specific byte.
@@ -106,18 +105,10 @@ sepByAcc :: Default m => Yp s (m -> m) -> Yp s () -> Yp s m
 sepByAcc p s = (do v <- p; (s *> _sepBy1Acc (v def) p s) <|> def) <|> def
  where
    _sepBy1Acc _m _p _s = go _m where go an = (do f <- p; s *> go (f an)) <|> def
-{-
-sepBy1HashSet :: (Eq a, Hashable a) => Yp s a -> Yp s sep -> Yp s (HS.HashSet a)
-sepBy1HashSet p s = fix $ \go -> liftA2 HS.insert p ((s *> go) <|> def)
-{-# INLINE sepBy1HashSet #-}
 
-sepByHashSet :: (Eq a, Hashable a) => Yp s a -> Yp s sep -> Yp s (HS.HashSet a)
-sepByHashSet p s = liftA2 HS.insert p ((s *> sepBy1HashSet p s) <|> def) <|> def
-{-# INLINE sepByHashSet #-}
--}
 -- | Skip one or more instances of an action.
 skipMany1 :: Yp s a -> Yp s ()
-skipMany1 p = p *> skipMany p
+skipMany1 p = p *> skipMany p <?> "skipMany1"
 {-# INLINE skipMany1 #-}
 
 -- | @between@ also eats up any white space between the three
@@ -134,12 +125,13 @@ between op cp p = op *> seek p <* seek cp
 
 -- | Synonym for 'between oParen cParen'
 delimited :: Yp s a -> Yp s a
-delimited = between oParen cParen
+delimited par = between oParen cParen par <?> "delimited"
 {-# INLINE delimited #-}
 
 -- | Parses a tuple. Eats in-between white space.
 tuple :: Yp s a -> Yp s (T2 a a)
 tuple p = liftA2 T2 (oParen *> seek p <* seek comma) (seek p <* seek cParen)
+  <?> "tuple"
 {-# INLINE tuple #-}
 
 -- | Parses a range. Eats in-between white spacing.
@@ -156,6 +148,7 @@ grouped sep p = delimited $ sepBy1 (seek p) (seek sep)
 
 #define CP(n,v) n :: Yp s Byte; n = byte v; {-# INLINE n #-}
 CP(tab,9)
+CP(bang,33)
 CP(quote,34)
 CP(dollar,36)
 CP(oParen,40)
@@ -189,7 +182,6 @@ ellipsis = void $ dot *> dot
 ------------------------------------------------------------------------
 --- FAST PREDICATE PARSERS
 
--- Yes, I am that lazy.
 #define GO(label,comb,pred) label = comb (pred) <?> "label"; {-# INLINE label #-}
 GO(anyByte,satisfy,const True)
 GO(endOfLine,void,string "\n" <|> string "\r\n")
@@ -236,7 +228,6 @@ decimal = BS.foldl' step 0 `fmap` takeWhile1 isDigit
 {-# SPECIALISE decimal :: Yp s Word64 #-}
 {-# INLINE decimal #-}
 
--- A strict pair
 data SP = SP {-# UNPACK #-} !Integer {-# UNPACK #-} !Int
 
 scientifically :: (Scientific -> a) -> Yp s a
@@ -270,7 +261,7 @@ scientifically h = do
       pure (h $ scientific signedCoeff    e)
 {-# INLINE scientifically #-}
 
-
+-- | Parse a Haskell double, system based.
 double :: Yp s Double
 double = scientifically toRealFloat
 {-# INLINABLE double #-}
@@ -281,6 +272,7 @@ signed :: Num a => Yp s a -> Yp s a
 signed p = (negate <$> (dash *> p))
        <|> (plus *> p)
        <|> p
+       <?> "signed"
 {-# SPECIALISE signed :: Yp s Double -> Yp s Double #-}
 {-# SPECIALISE signed :: Yp s Float -> Yp s Float #-}
 {-# SPECIALISE signed :: Yp s Int -> Yp s Int #-}
@@ -321,17 +313,17 @@ takeWhile1 p = do
   let len = length s
   if len /= 0
     then do
-      b <- advance len
+      advance len
       pure s
-    else fault InternalError "takeWhile1"
+    else internalError "takeWhile1"
 {-# INLINE takeWhile1 #-}
 
 -- -----------------------------------------------------------------------------
 -- Specialty Parsers
 
 -- | 'lineSeperated' is a parser that allows a compact way of consuming white
--- space but ensuring atleast 1 newline character is parsed. It continues to parse
--- any further whitespace (including more newlines).
+-- space but ensuring atleast 1 newline character is parsed. It continues to
+-- parse any further whitespace (including more newlines).
 lineSeperated :: Yp s ()
 lineSeperated = do
   horizontalSpace  -- Parse remainder of any of current lines whitespace
@@ -364,8 +356,10 @@ stringWithMorph f s0 = YP $ \b e st l s ->
       pos = position e
       b_  = bufferSubstring pos n b
   in if
-    | bufferLengthAtLeast pos n b && (s0 == f b_)  -> s (posMap (+n) e) b b_
-    | otherwise                                    -> l e "stringWithMorph" InternalError st
+    | bufferLengthAtLeast pos n b && (s0 == f b_)
+        -> s (posMap (+n) e) b b_
+    | otherwise
+        -> l e "stringWithMorph" ParseError st
 {-# INLINE stringWithMorph #-}
 
 -- | 'notFollowedBy'
@@ -377,7 +371,7 @@ notFollowedBy :: (Byte -> Bool) -> Yp s ()
 notFollowedBy p = do
   b <- peekByte
   if p b
-    then fault InternalError $ "predicate failed: found a '" ++ sig b ++ "'"
+    then parseError $ "predicate failed: found a '" ++ sig b ++ "'"
     else unit
   <?> "notFollowedBy"
 
@@ -402,7 +396,7 @@ relOp = tokens [
   , T2 ">=" (>=)
   , T2 "==" (==)
   , T2 "!=" (/=)
-  ] <|> fault InternalError "ordering"
+  ] <|> parseError "expected an equality operator (<, >, <=, >=, ==, !=)"
   <?> "relOp"
 {-# INLINE relOp #-}
 {-# SPECIALIZE relOp :: Yp s (Int64 -> Int64 -> Bool) #-}
@@ -413,8 +407,10 @@ relOp = tokens [
 
 
 -- | 'isSucc' runs a parser and returns True\False if it is successful\failed,
--- discards the results (although any "stateful" effects will occur -- hence
--- usually used when in cases that have no effec)
+-- discards the results, although any "statefull" effects incurred during
+-- running of the parser will remain.
+--
+-- Does not fail.
 isSucc :: Yp s a -> Yp s Bool
 isSucc p = (p $> True) <|> pure False
 
@@ -423,6 +419,19 @@ isSucc p = (p $> True) <|> pure False
 
 
 
+
+
+{-
+import qualified Data.HashSet as HS
+
+sepBy1HashSet :: (Eq a, Hashable a) => Yp s a -> Yp s sep -> Yp s (HS.HashSet a)
+sepBy1HashSet p s = fix $ \go -> liftA2 HS.insert p ((s *> go) <|> def)
+{-# INLINE sepBy1HashSet #-}
+
+sepByHashSet :: (Eq a, Hashable a) => Yp s a -> Yp s sep -> Yp s (HS.HashSet a)
+sepByHashSet p s = liftA2 HS.insert p ((s *> sepBy1HashSet p s) <|> def) <|> def
+{-# INLINE sepByHashSet #-}
+-}
 
 {-
 
