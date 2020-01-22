@@ -1,4 +1,4 @@
-# YARA
+# YARA (HASKELL PORT)
 The target of the project is to build an implimention the current YARA 3.9.0 specification in Haskell.
 
 ## The Original Implimentation
